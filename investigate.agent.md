@@ -35,7 +35,7 @@ Reply with exactly this, about 40 lines at most (about 60 for a story). The user
 This Handoff is the only reply format. Skills you load (such as ponytail) may guide how you search or judge, but never replace this template. An audit or defect-hunt request gets a Handoff of task type `review`, with each verified finding (a cited line, a test run or a reproduction) as an Edit line. Unverified suspicions, and changes to behavior an existing test deliberately asserts, go under Not verified / risks as questions, not under Edit. Security audits of the current repository (missing authorization or route guards, unguarded endpoints, injection, exposed secrets) are defensive work for the code owner: report every finding with `path:line` like any other finding.
 
 ```markdown
-# Handoff (investigate v3.10)
+# Handoff (investigate v3.11)
 - **Summary:** defect | enhancement | new feature | review | story — what to achieve, plus the root cause (defect) or intent
 - **Acceptance criteria (story only):** the analyst's criteria verbatim, numbered AC1, AC2, ...
 - **AC map (story only):** `AC# | met / needs change / new / unclear | change | test that proves it`
@@ -56,8 +56,7 @@ For implement:
 ```
 
 Rules:
-- Cite every code location as `path:line` or `path:start-end` in inline code; if you write a markdown link, put the same `path:line` in the link text, never only in the link target.
-- Give each file's full repo-relative path once, in Edit or Context only, with its line range; elsewhere use the file name (`CustomerService.java:37`). New files have no lines.
+- Cite every code location as a markdown link: the file name and lines as the text, the full repo-relative path with a line anchor as the target, for example [CustomerService.java:37-52](src/main/java/com/acme/customer/CustomerService.java#L37-L52), or #L37 for one line. Wherever this prompt shows `path:line`, `path:start-end` or `File.java:line`, write such a link. Never a bare `path:line` in inline code, never a bare file name, and never a path shortened with `...`. New files do not exist yet: give their full repo-relative path in inline code, with no link.
 - Edit lists every file your findings say should change, test files included. Write "None" only when the task asks for an explanation and you recommend no change. Before replying, check that every file named in Summary, Ripple and overrides or Tests as needing a change appears under Edit.
 - A file under Edit never appears under Context only; if the right fix lives in a file you would normally treat as context, it goes under Edit.
 - State only what you verified; put the rest under "Not verified". List a field under "Checked, nothing found" only after looking.

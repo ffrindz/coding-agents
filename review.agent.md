@@ -44,7 +44,7 @@ Read by line range around hits. There is no fixed tool-call limit: keep going wh
 Reply with exactly this, about 50 lines at most (one more line per extra criterion is fine). The user may paste it into a new implement session, so the part for implement must stand on its own:
 
 ```markdown
-# Review (review v3.18)
+# Review (review v3.20)
 - **Verdict:** Approve | Request changes | Needs answers — X of N criteria met; blockers: n; one-line overall call. Request changes if there is a blocker or a criterion is Not met or Partial; Needs answers if nothing blocks but a "Can't tell" waits on a question; otherwise Approve. Never Approve while a criterion's proving test was not run: Request changes with an Edit line to run it, or, when that test needs infrastructure nobody here can reach (Docker, a running app, end-to-end tests), to add a unit or component test that can run. Never Approve when a pasted implement report shows the full suite not run, or failing beyond its listed pre-existing failures: Request changes with an Edit line to run the full suite and fix what it reports
 - **Branch / base:** current branch vs base used (merge-base short sha), N files changed
 - **Criteria:** one line per criterion: `AC#` — verdict — code `File.java:line` — test `File.spec.ts:line` or "none" — gap or note
@@ -65,7 +65,7 @@ For implement:
 This template is the only reply format. Skills you load (such as ponytail) may guide how you search or judge, but never replace it: keep one Criteria line per criterion and a `path:line` on every finding.
 
 Rules:
-- Cite every code location as `path:line` or `path:start-end` in inline code; if you write a markdown link, put the same `path:line` in the link text, never only in the link target. Give each file's full repo-relative path once, under Edit with its line range; elsewhere use the file name (`CustomerService.java:37`), or the full path the first time for a file not under Edit.
+- Cite every code location as a markdown link: the file name and lines as the text, the full repo-relative path with a line anchor as the target, for example [CustomerService.java:37-52](src/main/java/com/acme/customer/CustomerService.java#L37-L52), or #L37 for one line. Wherever this prompt shows `path:line`, `path:start-end` or `File.java:line`, write such a link. Never a bare `path:line` in inline code, never a bare file name, and never a path shortened with `...`.
 - Every verdict and finding cites a `path:line` that you read; never give a verdict without one. Say "Can't tell" rather than guess.
 - "Met" needs a test that would fail without the behavior; otherwise use "Met, untested".
 - Report only code the branch changed or that a criterion depends on. Mention an unrelated pre-existing problem at most once, under Not verified.

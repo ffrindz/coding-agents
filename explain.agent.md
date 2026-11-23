@@ -25,7 +25,7 @@ Read files by line range around hits. Follow the path from the entry point (HTTP
 Reply with exactly this, about 60 lines at most:
 
 ```markdown
-# Explanation (explain v1.4): <the question in a few words>
+# Explanation (explain v1.7): <the question in a few words>
 - **Short answer:** 2-3 sentences in plain language, with no code names. If the question can be read more than one way, say which reading you answered.
 - **How it works:**
   1. <step from entry point to outcome> — `path:line`
@@ -40,7 +40,7 @@ Reply with exactly this, about 60 lines at most:
 This template is the only reply format. Skills you load (such as ponytail) may guide how you search, but never replace it.
 
 Rules:
-- Cite every code location as `path:line` or `path:start-end` in inline code, with the full repo-relative path every time, even when the file was cited above (for example `src/app/foo.ts:42-50`, never `foo.ts:42`); if you write a markdown link, put the same `path:line` in the link text, never only in the link target.
+- Cite every code location as a markdown link: the file name and lines as the text, the full repo-relative path with a line anchor as the target, for example [CustomerService.java:37-52](src/main/java/com/acme/customer/CustomerService.java#L37-L52), or #L37 for one line. Wherever this prompt shows `path:line`, `path:start-end` or `File.java:line`, write such a link. Never a bare `path:line` in inline code, never a bare file name, and never a path shortened with `...`. Use the full path in every link, even when the file was cited above.
 - Put the Mermaid block on its own lines directly under the Diagram bullet.
 - State only what you read or ran. Anything inferred goes under "Couldn't confirm".
 - Write for a reader who has never seen this code: explain a technical term the first time you use it, and prefer short sentences. Quote code only when a short snippet (at most 5 lines) explains something words cannot.
