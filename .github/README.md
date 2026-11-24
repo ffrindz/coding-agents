@@ -4,11 +4,11 @@ Five GitHub Copilot custom agents for working on Angular + Java codebases (Maven
 
 | Agent | Use it to | Edits code? | Model |
 |---|---|---|---|
-| **investigate** | Find the root cause of a defect or plan a change. Produces a handoff that implement can act on without searching again. | No | GPT-6 Luna |
+| **investigate** | Find the root cause of a defect or plan a change. Produces a handoff that implement can act on without searching again. | No (terminal for git and one test run) | GPT-6 Luna |
 | **implement** | Make the change: smallest complete edit, then compile, test, lint and run the full suite. | Yes | GPT-6.1 Sol (falls back to GPT-6 Luna) |
-| **review** | Check the branch against the story's acceptance criteria, one verdict per criterion with code and test evidence. | No | GPT-6.1 Sol (falls back to GPT-6 Luna) |
-| **explain** | Answer "how does X work?" in plain language, with cited code and a diagram when useful. | No | GPT-6 Luna |
-| **spec** | Turn a UI team's requirement into a spec for a systems analyst: our API's contract, which downstream endpoints supply each field, and the field mapping. | No | GPT-6 Luna |
+| **review** | Check the branch against the story's acceptance criteria, one verdict per criterion with code and test evidence. | No (terminal for git and one test run) | GPT-6.1 Sol (falls back to GPT-6 Luna) |
+| **explain** | Answer "how does X work?" in plain language, with cited code and a diagram when useful. | No (read and search only) | GPT-6 Luna |
+| **spec** | Turn a UI team's requirement into a spec for a systems analyst: our API's contract, which downstream endpoints supply each field, and the field mapping. | No (read, search and GitHub only) | GPT-6 Luna |
 
 ## Prerequisites
 
@@ -24,7 +24,7 @@ Five GitHub Copilot custom agents for working on Angular + Java codebases (Maven
 - Tests that need Docker or other infrastructure are skipped and reported as not run, so expect "Met, untested" verdicts for anything only those tests cover.
 
 **Terminal approvals**
-- The agents run terminal commands (git, builds, tests). VS Code asks you to approve each command unless you allow it in its terminal auto-approve settings. Allowing read-only commands (`git status`, `git diff`, `git log`) and the project's build and test commands saves most prompts; keep anything that changes or deletes files or branches on manual approval.
+- Only implement can edit files. explain and spec have no terminal and no edit tool, so they cannot change anything. investigate and review keep a terminal for git and one targeted test run; their prompts allow only read-only commands, and they report any file that changed during their run. implement, investigate and review run terminal commands (git, builds, tests). VS Code asks you to approve each command unless you allow it in its terminal auto-approve settings. Allowing read-only commands (`git status`, `git diff`, `git log`) and the project's build and test commands saves most prompts; keep anything that changes or deletes files or branches on manual approval.
 
 **Optional**
 - [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on your PATH: `brew install ripgrep` (macOS) or `winget install BurntSushi.ripgrep.MSVC` (Windows). Copilot's built-in search tools and the Copilot CLI bring their own copy, but the model sometimes types `rg` in the VS Code terminal; without it that call fails and the agent falls back to slower searches.
