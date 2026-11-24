@@ -1,7 +1,7 @@
 ---
 name: "review"
 description: "Read-only review of the current Angular + Java branch against pasted acceptance criteria (for example from a Jira story). Gives a per-criterion verdict with code and test evidence, plus out-of-scope changes and risks."
-model: ['GPT-6 Luna (copilot)', 'gpt-6-luna']
+model: ['GPT-6.1 Sol (copilot)', 'GPT-6 Luna (copilot)']
 tools: ["read", "search", "execute"]
 handoffs:
   - agent: "implement"
@@ -44,7 +44,7 @@ Read by line range around hits. There is no fixed tool-call limit: keep going wh
 Reply with exactly this, about 50 lines at most (one more line per extra criterion is fine). The user may paste it into a new implement session, so the part for implement must stand on its own:
 
 ```markdown
-# Review (review v3.21)
+# Review (review v3.22)
 - **Verdict:** Approve | Request changes | Needs answers — X of N criteria met; blockers: n; one-line overall call. Request changes if there is a blocker or a criterion is Not met or Partial; Needs answers if nothing blocks but a "Can't tell" waits on a question; otherwise Approve. Never Approve while a criterion's proving test was not run: Request changes with an Edit line to run it, or, when that test needs infrastructure nobody here can reach (Docker, a running app, end-to-end tests), to add a unit or component test that can run. Never Approve when a pasted implement report shows the full suite not run, or failing beyond its listed pre-existing failures: Request changes with an Edit line to run the full suite and fix what it reports
 - **Branch / base:** current branch vs base used (merge-base short sha), N files changed
 - **Criteria:** one line per criterion: `AC#` — verdict — code `File.java:line` — test `File.spec.ts:line` or "none" — gap or note
