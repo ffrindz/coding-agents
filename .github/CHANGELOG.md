@@ -1,0 +1,57 @@
+# Changelog
+
+Every change was tested before and after with headless Copilot CLI runs on public sample apps (JHipster sample app, Spring PetClinic, ThingsBoard, plus small purpose-built apps). Results are counts of runs, so small numbers mean thin evidence.
+
+## Current versions
+
+| Agent | Version | Model |
+|---|---|---|
+| investigate | v3.11 | GPT-6 Luna |
+| implement | v3.13 | GPT-6.1 Sol, fallback GPT-6 Luna |
+| review | v3.23 | GPT-6.1 Sol, fallback GPT-6 Luna |
+| explain | v1.7 | GPT-6 Luna |
+| spec | v1.15 | GPT-6 Luna |
+
+## 2026-11-23
+
+- **review v3.23:** lists existing test files the change modified or deleted (`git diff --name-status`) and reports each one; it is a blocker when a criterion says existing tests stay unchanged (adding a rule counts as a change) or when an assertion is removed or weakened. Refactor that added a rule to an existing architecture test, against a criterion forbidding test edits: Sol blocked it 0/2 → 2/2 (before, it called the edit "additive"), Luna 1/2 → 2/2. Four correct changes, two of them with legitimate test edits, still approved 4/4.
+- **spec v1.15:** when a downstream API's app ID is given, find its repository even if its Swagger file is attached, compare the two, map from the attached file, and list differences that affect mapped fields and ask which is deployed. If the repository can't be found, map from the attachment and say so. Before → after: repository checked with a file attached 3/6 → 6/6; stale attached file caught and questioned 1/2 → 2/2; no regressions on 4 earlier cases.
+- **review v3.22:** runs on GPT-6.1 Sol (fallback Luna). On a refactor that had to keep the API unchanged, Luna review approved broken changes 6 of 11 times, Sol review 1 of 6.
+- **review v3.21:** an edge case no criterion mentions (for example concurrency) is a `should-fix` finding with a question; it no longer stops Approve. A correct change went from Needs answers to Approve; known-bad changes were still blocked.
+- **spec v1.14:** application IDs (`ap` + 6 digits) prefix repository names; one ID can have several repositories, and spec picks the one holding the API.
+- **spec v1.13:** find a downstream repository by app name or ID with the GitHub tools, say which repository and branch were used, and list rejected candidates.
+- **spec v1.11–v1.12:** field mapping table pairs each field of our API with the downstream field and shows both types (with a warning on mismatches such as minor units); one call per page when an endpoint accepts several values.
+- **spec v1.8:** no semicolons in Mermaid diagrams. Broken diagrams in VS Code chat: 7/10 → 0/10.
+
+## 2026-11-22
+
+- **All agents (investigate v3.11, implement v3.13, review v3.20, explain v1.7):** cite code as clickable markdown links with line anchors. Links 0 → 185, 183 of them valid.
+- **implement v3.12:** fallback model changed to GPT-6 Luna.
+- **spec v1.6–v1.7:** plain-English section for the analyst (who reads Swagger and JSON but not code), with the field mapping table in that section.
+- **spec v1.5:** GitHub access narrowed to three read-only tools.
+- **spec v1.0–v1.3:** new agent. Against plain Copilot on the same model: 16/16 checks vs 9–11/16 on the two harder requirements, and no invented fields in either.
+
+## 2026-11-21
+
+- **implement v3.11, review v3.18:** implement must run the full test suite before reporting; review won't approve when the report shows it wasn't run. A refactor that broke an architecture test was caught 0/2 → 2/2.
+- **implement v3.10, review v3.17:** use the project's Node wrapper when the active Node doesn't match; review runs one targeted test command per stack; "Met" needs a test that passed in a run.
+- **All agents (v3.9 / v1.4):** report templates redesigned: one Edit line per file with line ranges, empty fields collapsed into one "Checked, nothing found" line.
+- **All agents (v3.6–v3.8):** removed code-graph and ast-grep search instructions. On a 9,000-file repository, accuracy and cost were the same with or without them; disabling the graph skill cut credits about 21%.
+- **investigate v3.7:** security audits of the current repository are answered, not refused (the trimmed prompt had refused 2 of 15 times).
+- **implement v3.7:** run `git status --short` first and leave the user's own uncommitted changes alone. The Stack line names the frontend-maven-plugin skip flags.
+
+## Tried and dropped
+
+These were tested and removed because they didn't help or made things worse. Don't add them back without new evidence.
+
+| Change | Agent | Result |
+|---|---|---|
+| "Never run these commands" line | implement | Followed 1 of 4 times. A Copilot CLI deny rule blocked it 1 of 1. |
+| Maintainability checks (duplication, null handling, leaks) | review | Seeded defects found 3/8 → 5/12 (no real gain); correct changes approved 11/12 → 7/12. Use build tools instead. |
+| Check that API responses stay unchanged | review (Luna) | Missed the broken refactor 3 of 3 times. Running review on Sol fixed it. |
+| Keep-the-contract paragraph | implement (Luna) | Responses kept 0, 18, 22 of 35 vs 20, 20, 21 without it. |
+| Rule against escaped slashes in links | spec | Still happened in 1 of 2 runs. |
+| Diagram-first layout, terms list for newcomers | explain | Readers flagged more unexplained terms (49% → 60–79%). |
+| Hand-edited generated files rule; pre-existing failures field | review, implement | 0 of 6 runs changed. |
+| Gemini 4 Neon for spec | spec | Same accuracy, writing judged worse (6.7 vs 7.4 of 10), about 20× the credits. |
+| High or extra-high effort | all | Never scored higher and cost more (extra-high about 30% more than high). |
