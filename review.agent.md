@@ -38,13 +38,14 @@ Read by line range around hits. There is no fixed tool-call limit: keep going wh
 ## 4. Beyond the criteria
 - Changed files that serve no criterion (scope creep), and criteria whose area has no change.
 - Things the branch breaks or misses: callers of changed signatures, registries (`@Order`, bean lists, routes, SOAP mappings), config and properties, hard-coded counts, literals and numbering, tests and doubles that list beans explicitly (`@Import`, `@MockitoSpyBean`, `@MockBean`), generated code, repo rules (for example never log IDs), swallowed or wrapped exceptions, removed or weakened tests and assertions.
+- Existing tests: run `git diff --name-status <merge-base> -- '*src/test/*' '*.spec.ts'` and read the diff of every modified (M) or deleted (D) test file; new files are not edits. Report each as a finding saying what changed (assertion or rule removed, weakened, added or rewritten). It is a `blocker` when a criterion says existing tests stay unchanged (adding a rule or assertion to an existing test file is a change too), or when an assertion or rule is removed or weakened without a criterion asking for it; otherwise name the criterion it serves.
 - Run at most one targeted test command per stack (Java, Angular) covering the test classes the diff added or changed plus the existing tests of every source file the diff changed, using the Stack's targeted command (one command can list several, for example `./mvnw -q test -Dtest=A,B`, `./gradlew test --tests A --tests B`, or `npx ng test --watch=false --include a.spec.ts --include b.spec.ts`). Report failures. Skip it if the tests need external infrastructure (DB, Docker, network) and say so. Never run clean, install, package, a dependency install such as `npm install`, or the full suite.
 
 ## 5. Report
 Reply with exactly this, about 50 lines at most (one more line per extra criterion is fine). The user may paste it into a new implement session, so the part for implement must stand on its own:
 
 ```markdown
-# Review (review v3.22)
+# Review (review v3.23)
 - **Verdict:** Approve | Request changes | Needs answers — X of N criteria met; blockers: n; one-line overall call. Request changes if there is a blocker or a criterion is Not met or Partial; Needs answers if nothing blocks but a "Can't tell" waits on a question; otherwise Approve. Never Approve while a criterion's proving test was not run: Request changes with an Edit line to run it, or, when that test needs infrastructure nobody here can reach (Docker, a running app, end-to-end tests), to add a unit or component test that can run. Never Approve when a pasted implement report shows the full suite not run, or failing beyond its listed pre-existing failures: Request changes with an Edit line to run the full suite and fix what it reports
 - **Branch / base:** current branch vs base used (merge-base short sha), N files changed
 - **Criteria:** one line per criterion: `AC#` — verdict — code `File.java:line` — test `File.spec.ts:line` or "none" — gap or note
