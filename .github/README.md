@@ -1,6 +1,6 @@
 # Coding agents for Angular + Java
 
-Five GitHub Copilot custom agents for working on Angular + Java codebases (Maven or Gradle, Spring or plain Java). Each one is a single `.agent.md` file.
+Six GitHub Copilot custom agents for working on Angular + Java codebases (Maven or Gradle, Spring or plain Java). Each one is a single `.agent.md` file.
 
 | Agent | Use it to | Edits code? | Model |
 |---|---|---|---|
@@ -8,6 +8,7 @@ Five GitHub Copilot custom agents for working on Angular + Java codebases (Maven
 | **implement** | Make the change: smallest complete edit, then compile, test, lint and run the full suite. | Yes | GPT-6.1 Sol (falls back to GPT-6 Luna) |
 | **review** | Check the branch against the story's acceptance criteria, one verdict per criterion with code and test evidence. | No (terminal for git and one test run) | GPT-6.1 Sol (falls back to GPT-6 Luna) |
 | **explain** | Answer "how does X work?" in plain language, with cited code and a diagram when useful. | No (read and search only) | GPT-6 Luna |
+| **story** (trial) | Run a whole story: investigate, implement and review as subagents, passing the acceptance criteria to every review and repeating fix rounds until review approves, asks a question, or 3 rounds pass. | No (only starts the other agents) | GPT-6 Luna; each subagent uses its own model |
 | **spec** | Turn a UI team's requirement into a spec for a systems analyst: our API's contract, which downstream endpoints supply each field, and the field mapping. | No (read, search and GitHub only) | GPT-6 Luna |
 
 ## Prerequisites
@@ -32,9 +33,9 @@ Five GitHub Copilot custom agents for working on Angular + Java codebases (Maven
 
 ## Setup
 
-1. Download the five `.agent.md` files from this repository (or the whole repository as a ZIP).
+1. Download the six `.agent.md` files from this repository (or the whole repository as a ZIP).
 2. Copy them into the `agents` folder inside your user-level `.copilot` folder, which VS Code and the Copilot CLI both read personal agents from: `~/.copilot/agents` on macOS and Linux, `%USERPROFILE%\.copilot\agents` on Windows. Create the folder if it doesn't exist. Copy only the `.agent.md` files: Copilot tries to load every `.md` file in that folder as an agent.
-3. Restart VS Code (or open a new Copilot chat) and check that the five agents appear in the agent picker.
+3. Restart VS Code (or open a new Copilot chat) and check that the six agents appear in the agent picker.
 
 **Updating:** download the new `.agent.md` files and replace the old ones. Each report's first line shows the agent version (for example `# Review (review v3.23)`), so you can tell which version produced it; [CHANGELOG.md](CHANGELOG.md) lists what changed.
 
@@ -48,6 +49,10 @@ Five GitHub Copilot custom agents for working on Angular + Java codebases (Maven
 4. On Request changes, paste the review into a new implement chat ("Fix the items under Edit in this review"), then review again. Most stories finish in 1–2 rounds.
 
 Use a fresh chat for each step so each agent starts from the report alone. The handoff buttons at the end of a reply do this for you in VS Code (the Copilot CLI ignores them).
+
+### Or let the story agent run the chain (trial)
+
+Paste the story with its acceptance criteria into the **story** agent. It runs investigate, shows you the handoff and waits for "go", then runs implement and review in separate subagents (each with fresh context and its own model), sending every review the criteria exactly as you gave them. It stops to ask you when review says Needs answers, and after 3 rounds at most. Say "run without stopping" in your message to skip the handoff stop. Each subagent uses the model in its own agent file (checked in VS Code and the Copilot CLI), but the effort you pick for story applies to all of them: pick **High**, so implement and review run Sol at the effort they were tested with.
 
 ### Writing a spec
 
@@ -75,6 +80,7 @@ Chosen by measured quality first, then credits and time per correct result (head
 
 - **Response order in refactors:** no model caught a refactor that changed the order of items in an API response. For refactors that must keep the API unchanged, compare recorded responses before and after (a contract or snapshot test).
 - **Code quality:** prompt rules did not make review find duplication or null-handling bugs. Use build tools (Checkstyle, PMD, SpotBugs, ESLint, ArchUnit): implement runs the full build and review will not approve without it, so build rules are enforced automatically.
+- **story retypes reports:** the orchestrator passes each report on by rewriting it, so 1 or 2 lines per story can differ by a word or a character from what the subagent wrote. The acceptance criteria reached review verbatim in every test. If a line in a handoff or review looks wrong, check the file it cites.
 - **Prompt rules are not guarantees:** a rule such as "never run git checkout" was followed 1 time in 4. Block commands with tool settings (for example terminal auto-approve deny lists in VS Code) instead.
 
 ## Changing an agent
