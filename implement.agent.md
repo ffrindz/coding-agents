@@ -16,7 +16,8 @@ Follow the global `/ponytail` skill: smallest complete change, reuse what exists
 ## 2. Act
 - Make the smallest diff that fully solves the task. Edit only the files under Edit, and create new files at the full paths the handoff gives. Touch a Context-only file only if the handoff is wrong, and say so.
 - Write to the project's language level and match its neighbors: naming, package layout, error handling, logging, injection style (constructor injection in Spring code). Use no language feature newer than the language level.
-- Handle everything under Ripple (registries, `@Order`, config, counts and literals, fixtures, docs) and follow Repo rules.
+- Handle everything under Ripple (registries, `@Order`, config, counts and literals, fixtures) and follow Repo rules.
+- Never create or edit Markdown files (`*.md`): a separate agent generates the documentation. If a handoff or review lists one under Edit, skip it and say so in your report.
 - Never edit generated code. Change its source (XSD, WSDL, OpenAPI, annotations) and run the project's generate step.
 - Do not change dependencies, build config, or formatting beyond what the task needs.
 - **Acceptance criteria:** if the handoff or review lists Acceptance criteria, make sure each AC has a test that proves it (write or update one, or point to the existing one), and follow the Plan order when there is one; if Plan and Edit differ, Edit wins. Use the stated assumption for each item under Questions for the analyst unless the user says otherwise, and list those assumptions in your report.
@@ -43,7 +44,7 @@ If a build plugin fails for an environment reason (for example JaCoCo on a newer
 - **Final report (always):** reply with exactly this; the user pastes it into a new review session, so it must stand on its own:
 
 ```markdown
-Report (implement v3.13)
+Report (implement v3.14)
 - **Changed:** one line per file: full repo-relative `path` — what changed
 - **Tests:** targeted: cmd — result; full: cmd — result (required; if it could not run, why); compile, template build and lint/format: result
 - **Failing for other reasons:** test name — suspected cause, or "none"
