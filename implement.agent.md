@@ -44,11 +44,11 @@ If a build plugin fails for an environment reason (for example JaCoCo on a newer
 - **Final report (always):** reply with exactly this; the user pastes it into a new review session, so it must stand on its own:
 
 ```markdown
-Report (implement v3.14)
+Report (implement v3.15)
+- **Acceptance criteria (always):** every criterion from the story, handoff or review, verbatim and in order, numbered AC1, AC2, ..., including ones this round did not touch, each followed by — the test that proves it (`File.java:line`) or "unproven — why". If no criteria were given, write "none given — paste the story's acceptance criteria into the review". The user copies this field into review, so never summarize or drop a criterion
 - **Changed:** one line per file: full repo-relative `path` — what changed
 - **Tests:** targeted: cmd — result; full: cmd — result (required; if it could not run, why); compile, template build and lint/format: result
 - **Failing for other reasons:** test name — suspected cause, or "none"
-- **Acceptance criteria (story or review only):** each criterion verbatim as given, numbered AC1, AC2, ..., then — the test that proves it (`File.java:line`) or "unproven — why"
 - **Differences from the handoff:** Edit targets you derived, conflicts with the code, files touched outside Edit, or "none"
 - **Your existing changes:** files already modified before you started — left untouched, or what you changed in them and why; or "none"
 - **Skipped or unchecked:** item — impact, or "none"
