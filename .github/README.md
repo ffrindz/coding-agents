@@ -9,7 +9,7 @@ Six GitHub Copilot custom agents for working on Angular + Java codebases (Maven 
 | **review** | Check the branch against the story's acceptance criteria, one verdict per criterion with code and test evidence. | No (terminal for git and one test run) | GPT-6.1 Sol (falls back to GPT-6 Luna) |
 | **explain** | Answer "how does X work?" in plain language, with cited code and a diagram when useful. | No (read and search only) | GPT-6 Luna |
 | **story** (trial) | Run a whole story: investigate, implement and review as subagents, passing the acceptance criteria to every review and repeating fix rounds until review approves, asks a question, or 3 rounds pass. | No (only starts the other agents) | GPT-6 Luna; each subagent uses its own model |
-| **spec** | Turn a UI team's requirement into a spec for a systems analyst: our API's contract, which downstream endpoints supply each field, and the field mapping. | No (read, search and GitHub only) | GPT-6 Luna |
+| **spec** | Turn a UI team's requirement into a spec for a systems analyst: functional and non-functional requirements, our API's contract, which downstream endpoints supply each field, and the field mapping. | No (read, search and GitHub only) | GPT-6 Luna |
 
 ## Prerequisites
 
@@ -82,7 +82,9 @@ spec stands alone; it is not part of the coding chain. Run it in the workspace o
 - each downstream API's Swagger/OpenAPI file attached (JSON or YAML);
 - each downstream API's application ID or repository name, so it can check the attached file against the repository.
 
-It writes a plain-English part for the analyst (including a field mapping table) and a technical part for engineers. When the attached file and the repository differ, it lists the differences and asks which one is deployed.
+It writes a plain-English part for the analyst (functional and non-functional requirements, and a field mapping table) and a technical part for engineers. When the attached file and the repository differ, it lists the differences and asks which one is deployed. Non-functional requirements the requirement and the downstream specs don't state (response times, caching, auth, audit) come back as questions, never as invented targets.
+
+**When the requirement changes or you have answers:** in a new chat, give the same requirement and downstream APIs, then "Previous spec:" with the whole previous spec, then your changes or answers. spec keeps the parts the changes don't affect word for word, adds "What changed since the previous spec" at the top, and costs about a third to a half of a fresh spec.
 
 ### Asking how something works
 
