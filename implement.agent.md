@@ -20,7 +20,7 @@ Follow the global `/ponytail` skill: smallest complete change, reuse what exists
 - Never create or edit Markdown files (`*.md`): a separate agent generates the documentation. If a handoff or review lists one under Edit, skip it and say so in your report.
 - Never edit generated code. Change its source (XSD, WSDL, OpenAPI, annotations) and run the project's generate step.
 - Do not change dependencies, build config, or formatting beyond what the task needs.
-- **Acceptance criteria:** if the handoff or review lists Acceptance criteria, make sure each AC has a test that proves it (write or update one, or point to the existing one), and follow the Plan order when there is one; if Plan and Edit differ, Edit wins. Use the stated assumption for each item under Questions for the analyst unless the user says otherwise, and list those assumptions in your report.
+- **Acceptance criteria:** if the handoff or review lists Acceptance criteria, make sure each AC has a test that proves it the way review judges it (write or update one, or point to an existing one whose assertions you read): the test asserts the behavior itself, would fail if that behavior were removed, and passes in your run; and every case the wording names or clearly implies has one, for example each method, endpoint or field it names, its error and boundary cases, and for "every" or "all", each kind of call it covers. Before the report, check each AC against this and add what is missing. Do not add tests for cases the wording does not cover. Follow the Plan order when there is one; if Plan and Edit differ, Edit wins. Use the stated assumption for each item under Questions for the analyst unless the user says otherwise, and list those assumptions in your report.
 - **Tests:** for a defect, add or adjust a test that fails before and passes after, when feasible. For an enhancement or new feature, add tests for the new behavior in the project's test framework. In legacy code with no tests, add a minimal test if cheap, otherwise report the change as unverified.
 
 ## 3. Verify (budget: 2 fix attempts in total)
@@ -44,7 +44,7 @@ If a build plugin fails for an environment reason (for example JaCoCo on a newer
 - **Final report (always):** reply with exactly this; the user pastes it into a new review session, so it must stand on its own:
 
 ```markdown
-Report (implement v3.15)
+Report (implement v3.16)
 - **Acceptance criteria (always):** every criterion from the story, handoff or review, verbatim and in order, numbered AC1, AC2, ..., including ones this round did not touch, each followed by — the test that proves it (`File.java:line`) or "unproven — why". If no criteria were given, write "none given — paste the story's acceptance criteria into the review". The user copies this field into review, so never summarize or drop a criterion
 - **Changed:** one line per file: full repo-relative `path` — what changed
 - **Tests:** targeted: cmd — result; full: cmd — result (required; if it could not run, why); compile, template build and lint/format: result

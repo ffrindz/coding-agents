@@ -47,12 +47,32 @@ Six GitHub Copilot custom agents for working on Angular + Java codebases (Maven 
 2. **implement:** in a new chat, paste the handoff (or the story itself for a small change). It edits, runs the checks and reports.
 3. **review:** in a new chat, paste the implement report (or the acceptance criteria). It replies Approve, Request changes or Needs answers.
 4. On Request changes, paste the review into a new implement chat ("Fix the items under Edit in this review"), then review again. Most stories finish in 1–2 rounds.
+5. On Needs answers, add your answers under the review before pasting it into implement. Don't send it without them: implement can't settle the question either.
+
+Every implement report starts with the story's acceptance criteria, so the report you paste into review always carries them.
 
 Use a fresh chat for each step so each agent starts from the report alone. The handoff buttons at the end of a reply do this for you in VS Code (the Copilot CLI ignores them).
 
 ### Or let the story agent run the chain (trial)
 
-Paste the story with its acceptance criteria into the **story** agent. It runs investigate, shows you the handoff and waits for "go", then runs implement and review in separate subagents (each with fresh context and its own model), sending every review the criteria exactly as you gave them. It stops to ask you when review says Needs answers, and after 3 rounds at most. Say "run without stopping" in your message to skip the handoff stop. Each subagent uses the model in its own agent file (checked in VS Code and the Copilot CLI), but the effort you pick for story applies to all of them: pick **High**, so implement and review run Sol at the effort they were tested with.
+1. In a new chat, pick **story**, set the effort to **High**, and paste the story with its acceptance criteria. If you already know the answer to an open question, put it in this message.
+2. It runs investigate, shows you the whole handoff and waits. Reply in one of three ways:
+
+   | You want to | Reply | What happens |
+   |---|---|---|
+   | Proceed | `go` | implement starts |
+   | Answer the handoff's questions | your answers, with or without `go` | implement starts; your answers go to implement and to every review |
+   | Change the approach | `Change the plan: ...` | investigate plans again from the previous handoff and waits again |
+
+3. implement and review then run by themselves, at most 3 rounds, each in a subagent with fresh context and its own model. Every review gets your criteria and answers exactly as you gave them.
+4. If review says Needs answers, it stops and shows the questions. Answer in the same chat and it carries on.
+5. The final reply gives the result, each round's verdict, the criteria lines and open items, then the last implement report and the last review in full. If it ends "Not approved after 3 rounds", paste the "Last review" into a new implement chat and continue by hand.
+
+Notes:
+- Answering at the handoff is cheaper than answering later: in one test it saved a whole implement + review round (2 rounds instead of 3).
+- Include the words "without stopping" in your first message to skip the handoff stop.
+- Each subagent uses the model in its own agent file, but the effort you pick for story applies to all of them. Pick High, so implement and review run Sol at the effort they were tested with.
+- Use the manual chain instead when you want to read or edit each step, for example on refactors.
 
 ### Writing a spec
 
