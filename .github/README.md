@@ -8,7 +8,7 @@ Six GitHub Copilot custom agents for working on Angular + Java codebases (Maven 
 | **implement** | Make the change: smallest complete edit, then compile, test, lint and run the full suite. | Yes | GPT-6.1 Sol (falls back to GPT-6 Luna) |
 | **review** | Check the branch against the story's acceptance criteria, one verdict per criterion with code and test evidence. | No (terminal for git and one test run) | GPT-6.1 Sol (falls back to GPT-6 Luna) |
 | **explain** | Answer "how does X work?" in plain language, with cited code and a diagram when useful. | No (read and search only) | GPT-6 Luna |
-| **story** (trial) | Run a whole story: investigate, implement and review as subagents, passing the acceptance criteria to every review and repeating fix rounds until review approves, asks a question, or 3 rounds pass. | No (only starts the other agents) | GPT-6 Luna; each subagent uses its own model |
+| **story** (trial) | Run a whole story: investigate, implement and review as subagents, passing the acceptance criteria and your answers to every round, stopping whenever a review has questions, and repeating fix rounds until review approves or 3 rounds pass. | No (only starts the other agents) | GPT-6 Luna; each subagent uses its own model |
 | **spec** | Turn a UI team's requirement into a spec for a systems analyst: functional and non-functional requirements, our API's contract, which downstream endpoints supply each field, and the field mapping. | No (read, search and GitHub only) | GPT-6 Luna |
 
 ## Prerequisites
@@ -64,8 +64,8 @@ Use a fresh chat for each step so each agent starts from the report alone. The h
    | Answer the handoff's questions | your answers, with or without `go` | implement starts; your answers go to implement and to every review |
    | Change the approach | `Change the plan: ...` | investigate plans again from the previous handoff and waits again |
 
-3. implement and review then run by themselves, at most 3 rounds, each in a subagent with fresh context and its own model. Every review gets your criteria and answers exactly as you gave them.
-4. If review says Needs answers, it stops and shows the questions. Answer in the same chat and it carries on.
+3. implement and review then run by themselves, at most 3 rounds, each in a subagent with fresh context and its own model. Every implement and review gets your criteria and all your answers so far, exactly as you gave them.
+4. If a review has questions (Needs answers, or Request changes with questions), it stops and shows the verdict, the questions and, for Request changes, the Edit items. Answer in the same chat and it carries on; the next round fixes the Edit items and applies your answers together. You only need to answer the new questions: earlier answers are passed on with them.
 5. The final reply gives the result, each round's verdict, the criteria lines and open items, then the last implement report and the last review in full. If it ends "Not approved after 3 rounds", paste the "Last review" into a new implement chat and continue by hand.
 
 Notes:

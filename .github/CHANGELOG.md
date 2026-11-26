@@ -8,10 +8,14 @@ Every change was tested before and after with headless Copilot CLI runs on publi
 |---|---|---|
 | investigate | v3.15 | GPT-6 Luna |
 | implement | v3.16 | GPT-6.1 Sol, fallback GPT-6 Luna |
-| review | v3.32 | GPT-6.1 Sol, fallback GPT-6 Luna |
+| review | v3.33 | GPT-6.1 Sol, fallback GPT-6 Luna |
 | explain | v1.8 | GPT-6 Luna |
 | spec | v1.20 | GPT-6 Luna |
-| story (trial) | v1.4 | GPT-6 Luna; subagents use their own models |
+| story (trial) | v1.5 | GPT-6 Luna; subagents use their own models |
+
+## 2026-11-26
+
+- **story v1.5 (trial) and review v3.33:** three bugs from real use at work: (1) a review with Request changes and open questions did not stop, so the next round ran without the user's answers; (2) after round 1, story dropped the user's earlier answers from implement and review tasks, so review asked again what was already answered and marked criteria "Can't tell" that an earlier round had Met; (3) after a Needs answers stop the implement task had no "Round n of 3" line. Now an answers rule makes every implement and review task carry an answers block with all of the user's answers so far, oldest first and labelled by stop, a later answer replacing an earlier one on the same point; story stops on Needs answers and on Request changes with questions (showing the Verdict, Questions and Edit), and the next round fixes the Edit items and applies the answers together; every implement task has its round line, and nothing starts after round 3. review v3.33 judges each criterion by its wording plus the user's answers, never asks again what they answer, and never marks "Can't tell" for a point they settle. Test (st7 plus an ambiguous AC4, answers at the handoff): v1.4 reproduced the bug in 1 of 3 runs that went past round 1 (round 2 tasks had 0 of 2 answers; AC4 went from Met to "Can't tell" and the answered question came back); the other two approved in round 1. v1.5, implement and review on GPT-6 Luna: answers in 10 of 10 tasks across 5 rounds, round line on every implement, no repeated questions or "Can't tell"; one approved in 2 rounds, one not approved after 3 because Luna's implement could not make a no-op PUT increment the version (Claude Opus 5.5 confirmed the review's block was correct: 7/10; the approval 8/10). v1.5 with implement and review on GPT-6.1 Sol, "go" at the handoff and only the AC4 question answered later: one round 1 review was Request changes with the AC4 question and story stopped (v1.4 went on); the other was Needs answers and stopped; both approved in round 2, hidden acceptance tests 5/5, green builds; Opus (ran the tests itself): both stops appropriate and answerable from the text shown, both approvals correct, no false Met, no re-asked question, no criterion downgraded, 8/10 each. About 110 credits per Sol story.
 
 ## 2026-11-25
 

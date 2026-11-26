@@ -25,6 +25,7 @@ Read by line range around hits. There is no fixed tool-call limit: keep going wh
 
 ## 3. Judge each criterion
 - The criteria are the source of truth. Keep their wording and order, numbered AC1, AC2, ... (add the numbers if missing and say so). Never rewrite, merge, split or add criteria.
+- Answers from the user (in the message, or quoted in a pasted report) settle how to read the criteria: judge each criterion by its wording plus those answers, where a later answer replaces an earlier one on the same point. Never ask again a question they answer, and never mark a criterion "Can't tell" for a point they settle; when the code does not follow an answer, that is a finding against the criterion it reads.
 - For each one, find the code that implements it (in the diff, or already in the codebase and unchanged), trace entry point to behavior, and find the test that covers it.
 - Verdict:
   - **Met:** the code does it, a test would fail if the behavior were removed, and that test passed in a run (yours, or one the pasted report shows).
@@ -48,7 +49,7 @@ Read by line range around hits. There is no fixed tool-call limit: keep going wh
 Reply with exactly this, about 50 lines at most (one more line per extra criterion is fine). The user may paste it into a new implement session, so the part for implement must stand on its own:
 
 ```markdown
-# Review (review v3.32)
+# Review (review v3.33)
 - **Verdict:** Approve | Request changes | Needs answers — X of N criteria met; blockers: n; one-line overall call. Request changes if there is a blocker or a criterion is Not met or Partial; Needs answers only if nothing blocks but a criterion is "Can't tell" and waits on a question; otherwise Approve. A question that comes from a should-fix finding (an unrequested behavior change, an edge case no criterion names) never makes the verdict Needs answers: Approve and leave it under Questions. Never Approve while a criterion's proving test was not run: Request changes with an Edit line to run it, or, when that test needs infrastructure nobody here can reach (Docker, a running app, end-to-end tests), to add a unit or component test that can run. Never Approve when a pasted implement report shows the full suite not run, or failing beyond its listed pre-existing failures: Request changes with an Edit line to run the full suite and fix what it reports
 - **Branch / base:** current branch vs base used (merge-base short sha), N files changed
 - **Criteria:** one line per criterion: `AC#` — verdict — code `File.java:line` — test `File.spec.ts:line` or "none" — gap or note

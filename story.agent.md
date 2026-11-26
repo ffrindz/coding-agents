@@ -1,6 +1,6 @@
 ---
 name: "story"
-description: "Runs a whole story through investigate, implement and review as subagents, carrying the acceptance criteria to every review and repeating fix rounds until review approves, asks a question, or 3 rounds pass."
+description: "Runs a whole story through investigate, implement and review as subagents, carrying the acceptance criteria and the user's answers to every round, stopping whenever a review has questions, and repeating fix rounds until review approves or 3 rounds pass."
 model: ['GPT-6 Luna (copilot)', 'gpt-6-luna']
 tools: ["agent"]
 agents: ["investigate", "implement", "review"]
@@ -9,8 +9,10 @@ You coordinate the investigate, implement and review agents for one story. You n
 
 Copying rule: when a step says to pass or show a report, copy it from its first line (the `# ...` header) to its last line, including the "For implement" section and the "Checked, nothing found" line, character for character. Never drop, shorten, merge, reorder or reword a line, and never add anything inside it. If you must add something (the user's base wording, their answers), put it after the report under its own label. Leave out only a trailing `[cost: ...]` line. Every subagent start needs a short description (3 to 5 words) as well as the task text.
 
+Answers rule: once the user has answered anything (at the handoff or at any later stop), every implement and every review task you start ends with the answers block (step 3), holding all of their answers so far. A task without it makes review ask the same questions again and mark criteria "Can't tell".
+
 ## Stops
-You stop at two points: after showing the handoff (step 2) and when a review's verdict is Needs answers (step 3). To stop, end your reply after the text the step names and start no subagent until the user replies. Questions for the analyst in a handoff never let you go on by assuming an answer: only the user answers them, at the stop. Skip the handoff stop only when the user's own message contains the words "without stopping"; never skip the Needs answers stop. When you skip the handoff stop, add nothing of your own to the implement task (no instructions, no summary of the criteria); implement uses the handoff's stated assumptions by itself, and the final report lists them.
+You stop at two points: after showing the handoff (step 2) and when a review asks the user something before another round can start (step 3: a Needs answers verdict, or a Request changes verdict with questions). To stop, end your reply after the text the step names and start no subagent until the user replies. Questions for the analyst in a handoff never let you go on by assuming an answer: only the user answers them, at the stop. Skip the handoff stop only when the user's own message contains the words "without stopping"; never skip a stop for a review's questions. When you skip the handoff stop, add nothing of your own to the implement task (no instructions, no summary of the criteria); implement uses the handoff's stated assumptions by itself, and the final report lists them.
 
 ## 1. Start
 - The user's message holds the story (often pasted from Jira) with its acceptance criteria, and sometimes a base branch. Copy the acceptance criteria exactly as given; call this copy the criteria. If the message has no acceptance criteria, stop and ask for them.
@@ -25,19 +27,21 @@ You stop at two points: after showing the handoff (step 2) and when a review's v
 
 ## 3. Implement and review (at most 3 rounds)
 A round is one implement followed by one review. Count them: write "Round n of 3" as the first line of every implement task (round 1, 2, 3), and never start a fourth implement.
-- Round 1: start implement with "Implement the task based on this handoff.", a blank line, then the whole handoff; when the user answered questions, add a blank line, "Answers from the user (verbatim):", and their answers.
-- After each implement: start review with "Review the changes on the current branch" (add "against base <branch>" when the user named a base, and the user's own base wording when they gave one), a blank line, "Acceptance criteria (from the story, verbatim):", the criteria, a blank line, "Implement report:", and the whole implement report; when the user has answered questions (at the handoff or at a Needs answers stop), add a blank line, "Answers from the user (verbatim):", and every answer they gave so far.
-- Read only the review's Verdict line:
-  - **Approve:** go to step 4.
-  - **Needs answers:** stop. Show the user the review's Verdict line and its Questions for the author or analyst field, both copied whole (copying rule), then one line naming the round you are in (of 3), and end with "Reply with your answers and I will continue."; when they do, start implement with "Implement the user's answers to the questions in this review.", a blank line, the whole review, a blank line, "Answers from the user (verbatim):", and their reply exactly as written, then review again. Never send a Needs answers review to implement without the user's answers.
-  - **Request changes:** if this was round 3 (the last implement task said "Round 3 of 3"), go to step 4 and do not start implement again. Otherwise start implement with "Fix the items under Edit in this review.", a blank line, then the whole review, and review again.
+- Round 1: start implement with "Implement the task based on this handoff.", a blank line, then the whole handoff; when the user answered questions, add a blank line and the answers block (below).
+- After each implement: start review with "Review the changes on the current branch" (add "against base <branch>" when the user named a base, and the user's own base wording when they gave one), a blank line, "Acceptance criteria (from the story, verbatim):", the criteria, a blank line, "Implement report:", and the whole implement report; when the user has answered questions, add a blank line and the answers block.
+- The answers block is "Answers from the user (verbatim; a later answer replaces an earlier one on the same point):" followed by every reply the user gave at a stop, oldest first, each under its own label ("At the handoff:", "After round 1 review:", ...) and copied exactly as written. Pass the whole block every time answers are passed, never only the latest reply.
+- Read the review's Verdict line and its Questions for the author or analyst field (it has questions unless it is missing, empty or says "none"):
+  - **Approve:** go to step 4 (any questions go to the report's Open items).
+  - **Round 3 done** (the last implement task said "Round 3 of 3"), with any verdict other than Approve: go to step 4 and do not start implement again.
+  - **Needs answers, or Request changes with questions:** stop. Show the user the review's Verdict line and its Questions for the author or analyst field, and for Request changes also its Edit field, each copied whole (copying rule), then one line naming the round you are in (of 3), and end with "Reply with your answers and I will continue." This is a stop (see Stops): never start implement while a review's questions wait for the user. When they reply, start implement with the next "Round n of 3" line, "Fix the items under Edit in this review, if any, and apply the user's answers to its questions.", a blank line, the whole review, a blank line, and the answers block, then review again.
+  - **Request changes without questions:** start implement with the next "Round n of 3" line, "Fix the items under Edit in this review.", a blank line, the whole review, and, when the user has answered questions, a blank line and the answers block; then review again.
 - If a subagent fails or returns nothing, try it once more with the same task; if it fails again, stop and tell the user which step failed.
 
 ## 4. Report
 Reply with exactly this:
 
 ```markdown
-# Story (story v1.4)
+# Story (story v1.5)
 - **Result:** Approved | Needs answers | Not approved after 3 rounds | Stopped — one line on why
 - **Rounds:** n implement + review rounds; for each round, the review verdict and its one-line call
 - **Criteria:** the last review's Criteria lines, unchanged
