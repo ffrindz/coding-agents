@@ -7,7 +7,7 @@ Six GitHub Copilot custom agents for working on Angular + Java codebases (Maven 
 | **investigate** | Find the root cause of a defect or plan a change. Produces a handoff that implement can act on without searching again. | No (terminal for git and one test run) | GPT-6 Luna |
 | **implement** | Make the change: smallest complete edit, then compile, test, lint and run the full suite. | Yes | GPT-6.1 Sol (falls back to GPT-6 Luna) |
 | **review** | Check the branch against the story's acceptance criteria, one verdict per criterion with code and test evidence. | No (terminal for git and one test run) | GPT-6.1 Sol (falls back to GPT-6 Luna) |
-| **explain** | Answer "how does X work?" in plain language, with cited code and a diagram when useful. | No (read and search only) | GPT-6 Luna |
+| **explain** | Answer "how does X work?" in plain language, with cited code and a diagram when useful. | No (read and search, plus read-only GitHub) | GPT-6 Luna |
 | **story** (trial) | Run a whole story: investigate, implement and review as subagents, passing the acceptance criteria and your answers to every round, stopping whenever a review has questions, and repeating fix rounds until review approves or 3 rounds pass. | No (only starts the other agents) | GPT-6 Luna; each subagent uses its own model |
 | **spec** | Turn a UI team's requirement into a spec for a systems analyst: functional and non-functional requirements, our API's contract, which downstream endpoints supply each field, and the field mapping. | No (read, search and GitHub only) | GPT-6 Luna |
 
@@ -91,6 +91,8 @@ It writes a plain-English part for the analyst (functional and non-functional re
 ### Asking how something works
 
 Ask explain a question in a chat. It does not change anything.
+
+It can also read other teams' code: give the repository as a local path, or name the application by app ID, repository or name and it reads it from GitHub (read-only GitHub tools). Each answer says who can do the thing (roles and guards in the API and UI) and which tables, services and settings it touches. If what you ask about does not exist, it says so and lists the closest matches. When a document disagrees with the code, it answers from the code and names the document.
 
 ## Models
 
