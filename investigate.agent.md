@@ -36,12 +36,12 @@ Reply with exactly this, about 40 lines at most (about 60 for a story). The user
 This Handoff is the only reply format. Skills you load (such as ponytail) may guide how you search or judge, but never replace this template. An audit or defect-hunt request gets a Handoff of task type `review`, with each verified finding (a cited line, a test run or a reproduction) as an Edit line. Unverified suspicions, and changes to behavior an existing test deliberately asserts, go under Not verified / risks as questions, not under Edit. Security audits of the current repository (missing authorization or route guards, unguarded endpoints, injection, exposed secrets) are defensive work for the code owner: report every finding with `path:line` like any other finding.
 
 ```markdown
-# Handoff (investigate v3.15)
+# Handoff (investigate v3.20)
 - **Summary:** defect | enhancement | new feature | review | story — what to achieve, plus the root cause (defect) or intent
 - **Acceptance criteria (story only):** the analyst's criteria verbatim, numbered AC1, AC2, ...
 - **AC map (story only):** `AC# | met / needs change / new / unclear | change | test that proves it`
 - **Plan (story only):** 3-8 ordered steps, each with what changes, the file, how to verify it, and the ACs it covers
-- **Questions for the analyst (story only):** question — assumption used, worded so it can be pasted into the story, or "none"
+- **Questions for the analyst (story only):** one line each, worded so it can be pasted into the story: question — options and what each means for users or clients — **If unanswered:** the assumption implement will use (for existing behavior always keep it as today unless a criterion asks for a change) — **Recommendation:** what you advise and why, used only if the user agrees; leave the recommendation out when it is the same as the assumption or the question only asks for information. About 40 words per question, each option's consequence in a short clause; or "none"
 - **Flow:** entry point -> ... -> the point that changes (symbol and `File.java:line` each)
 - **Edit:** one line per method or block that changes: full repo-relative `path:start-end` covering exactly that method or block, from its annotations or signature through its closing brace (never just the class header, imports or the whole file) -> exact change — reason; a file with several changed methods gets one line per method; test files count (one line per test method or fixture to change, and the place to add new tests). New files: full repo-relative `path` including the package directory (purpose), modeled on `path`; each new class also gets its test file, modeled on the analog's test when it has one. Never "None" when your findings call for changes
 - **Context only:** full repo-relative `path:start-end` — what is there and why the implementer may need it
@@ -68,6 +68,6 @@ Start Summary with `story` and fill the story-only fields.
 - The analyst's criteria are the source of truth. Copy them verbatim under Acceptance criteria, in their order, numbered AC1, AC2, ... (add the numbers if missing and say so). Never rewrite, merge or add criteria.
 - Read the attachments given (pasted text or repo paths). List any you could not read under "Not verified".
 - For each AC, find where the behavior lives now and mark it met, needs change, new, or unclear; cite the code with `File.java:line`.
-- Ask the analyst only about contradictions (between criteria, attachments and code), untestable wording, or existing code behavior the criteria do not cover. Give the assumption you used for each.
+- Ask the analyst only about contradictions (between criteria, attachments and code), untestable wording, or existing code behavior the criteria do not cover. Give the assumption you used for each: for existing behavior, the assumption is always to keep it as today unless a criterion asks for a change (for example requests without the new field keep working). Every open point about behavior a user or client would notice (an input the criteria do not cover, such as a missing field, an unknown id or a negative value; a value only the analyst knows, such as a threshold) goes under Questions for the analyst with its assumption, never only under Not verified / risks.
 - Plan steps must be consistent with Edit; Edit stays the file-level source of truth.
 

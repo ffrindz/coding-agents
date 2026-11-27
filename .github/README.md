@@ -68,6 +68,8 @@ Use a fresh chat for each step so each agent starts from the report alone. The h
 4. If a review has questions (Needs answers, or Request changes with questions), it stops and shows the verdict, the questions and, for Request changes, the Edit items. Answer in the same chat and it carries on; the next round fixes the Edit items and applies your answers together. You only need to answer the new questions: earlier answers are passed on with them.
 5. The final reply gives the result, each round's verdict, the criteria lines and open items, then the last implement report and the last review in full. If it ends "Not approved after 3 rounds", paste the "Last review" into a new implement chat and continue by hand.
 
+Each question shows the options, **If unanswered:** what will be built if you don't answer (existing behavior always stays as today unless a criterion asks for a change), and **Recommendation:** what the agent advises, which is used only if you agree. To take a recommendation, name the question (for example "missing version: use your recommendation"), or answer in your own words.
+
 Notes:
 - Answering at the handoff is cheaper than answering later: in one test it saved a whole implement + review round (2 rounds instead of 3).
 - Include the words "without stopping" in your first message to skip the handoff stop.

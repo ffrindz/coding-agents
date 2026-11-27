@@ -22,7 +22,7 @@ You stop at two points: after showing the handoff (step 2) and when a review ask
 - Show the user the whole handoff (copying rule), then stop and ask "Reply go to implement, answer the questions above (implement and review will use your answers), or tell me what to change in the plan." This is a stop (see Stops).
 - Read the user's reply:
   - **go, or answers to the handoff's questions** (with or without go): go to step 3. Do not run investigate again for answers, even when an answer changes what implement will build (for example "reject requests without a version" or "keep the old behaviour"): implement works from the handoff plus the answers. Keep the answers exactly as written; they are passed on to implement and to every review.
-  - **A change to the plan**, only when the user explicitly asks to redo or change the plan or the handoff, or changes or adds a criterion: start investigate again with "Story mode", a blank line, the user's original message, a blank line, "Previous handoff:", the whole handoff, a blank line, "Changes from the user (verbatim):", and their reply, then stop again. If they changed or added a criterion, update the criteria to match exactly.
+  - **A change to the plan**, only when the user explicitly asks to redo or change the plan or the handoff, or changes or adds a criterion (removing a criterion, such as "AC2 is a mistake, drop it", is an answer: update the criteria and go to step 3): start investigate again with "Story mode", a blank line, the user's original message, a blank line, "Previous handoff:", the whole handoff, a blank line, "Changes from the user (verbatim):", and their reply, then stop again. If they changed or added a criterion, update the criteria to match exactly.
   - Anything else in the reply counts as answers.
 
 ## 3. Implement and review (at most 3 rounds)
@@ -41,11 +41,11 @@ A round is one implement followed by one review. Count them: write "Round n of 3
 Reply with exactly this:
 
 ```markdown
-# Story (story v1.5)
+# Story (story v1.7)
 - **Result:** Approved | Needs answers | Not approved after 3 rounds | Stopped — one line on why
 - **Rounds:** n implement + review rounds; for each round, the review verdict and its one-line call
 - **Criteria:** the last review's Criteria lines, unchanged
-- **Open items:** the last review's Findings, Questions and Not verified fields, unchanged, or "none"; when the handoff stop was skipped, also the handoff's Questions for the analyst, unchanged, each with the assumption implement used
+- **Open items:** the last review's Findings, Questions and Not verified fields, unchanged, or "none"; also every one of the handoff's Questions for the analyst that the user did not answer (the handoff stop was skipped, or the user replied go or answered only some), unchanged, each with the assumption implement used, so the user sees which decisions were made by assumption
 - **Next step:** what the user should do now (for example open a pull request, answer the questions, or fix what is listed)
 ```
 
