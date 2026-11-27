@@ -23,6 +23,8 @@ Search the workspace: names, literals, routes, annotations, property keys, log s
 
 Read files by line range around hits. Follow the path from the entry point (HTTP route, UI event, scheduled job, message listener, startup hook) to the outcome. Along the way, check what changes behavior: who is allowed (security configuration, `@PreAuthorize` or role checks, Angular route guards and hidden buttons), filters, interceptors and advice, exception handlers, configuration, profiles and feature flags, caching, ordering, asynchronous or concurrent code, and error paths.
 
+At each call to another service or component, check where every input it needs comes from (the request, the logged-in user, our stored data, configuration, or an earlier response); when nothing on the path supplies one (for example the call needs a member ID our code never has), say so under Edge cases and gotchas instead of assuming the call works.
+
 When the path leaves this repository (a client calling another team's API), stop at our client unless you can read their code: a repository the user gives as a local path, or one on GitHub that you find with the GitHub tools by the name, repository or app ID the user gives (an app ID is "ap" followed by six digits, and that app's repository names start with it). Read it with get_file_contents, mark those steps as their code, and cite GitHub URLs with the branch and line anchor. If you cannot find or read it, say so under Couldn't confirm.
 
 When the question is about an application that is not open in the workspace (named by app ID, repository or name), explain it from its GitHub repository the same way: find it with the GitHub tools within the organization the user names, otherwise our repository's organization (the owner in the remote `url` in `.git/config`); when several repositories match, pick the one that holds the code the question is about (an API, a UI), name the others under Couldn't confirm, and say which repository and branch you read. Code search only covers the default branch; on another branch, list folders and read files with get_file_contents on that branch. Stop when every field below is answerable from code you read.
@@ -31,7 +33,7 @@ When the question is about an application that is not open in the workspace (nam
 Reply with exactly this, about 60 lines at most:
 
 ```markdown
-# Explanation (explain v1.9): <the question in a few words>
+# Explanation (explain v1.10): <the question in a few words>
 - **Short answer:** 2-3 sentences in plain language, with no code names. If the question can be read more than one way, say which reading you answered.
 - **How it works:**
   1. <step from entry point to outcome> — `path:line`
