@@ -65,6 +65,8 @@ class Flow(unittest.TestCase):
         self.sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.repo, capture_output=True, text=True).stdout.strip()
         open(os.path.join(self.t, 'story.txt'), 'w').write(STORY)
         open(os.path.join(self.t, 'reply.py'), 'w').write(REPLY)
+        self.log = os.path.join(self.t, 'runs.jsonl')
+        self.env = dict(os.environ, STORY_CTL_LOG=self.log)
 
     def tearDown(self):
         shutil.rmtree(self.t)
@@ -82,7 +84,8 @@ class Flow(unittest.TestCase):
         if replies is not None:
             qf = os.path.join(self.t, 'q.json'); json.dump(replies, open(qf, 'w'))
             args += ['--reply-cmd', f'{sys.executable} {os.path.join(self.t, "reply.py")} {qf}']
-        p = subprocess.run(args, cwd=self.repo, capture_output=True, text=True, stdin=stdin if stdin is not None else subprocess.DEVNULL)
+        p = subprocess.run(args, cwd=self.repo, capture_output=True, text=True, env=self.env,
+                           stdin=stdin if stdin is not None else subprocess.DEVNULL)
         self.out = p.stdout + p.stderr
         self.rc = p.returncode
         tf = os.path.join(self.state, 'trace.json')
@@ -277,10 +280,141 @@ class Flow(unittest.TestCase):
         qf = os.path.join(self.t, 'q.json'); json.dump(['go'], open(qf, 'w'))
         p = subprocess.run([sys.executable, CTL, os.path.join(self.t, 'story.txt'), '--fake', self.fake, '--no-open',
                             '--reply-cmd', f'{sys.executable} {os.path.join(self.t, "reply.py")} {qf}'],
-                           cwd=wt, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+                           cwd=wt, capture_output=True, text=True, stdin=subprocess.DEVNULL, env=self.env)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn('Approved', p.stdout)
         self.assertIn(os.path.join('.git', 'worktrees'), p.stdout)
+
+    # --- run log, stats, report ---
+    def logs(self):
+        return [json.loads(l) for l in open(self.log)] if os.path.exists(self.log) else []
+
+    def test_run_log_and_credits(self):
+        self.agents(investigate_1=HANDOFF, investigate_1_credits='2.5', implement_1=IMPL, implement_1_credits='20',
+                    review_1=RC, review_1_credits='10', implement_2=IMPL, implement_2_credits='5', review_2=APPROVE, review_2_credits='7.5')
+        self.run_ctl(['go'])
+        e = self.logs()[-1]
+        self.assertEqual((e['outcome'], e['rounds'], e['credits_total']), ('approved', 2, 45.0))
+        self.assertEqual(e['credits'], {'investigate': 2.5, 'implement': 25.0, 'review': 17.5})
+        self.assertEqual(e['agents'], {'implement': 'v3.16', 'review': 'v3.38'})
+        self.assertIn('**Credits and time:** 45 credits', self.final)
+        self.assertIn('(so far: 2 credits', open(os.path.join(self.state, 'stop-1.md')).read())
+
+    def test_no_log(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.run_ctl(['go'], extra=('--no-log',))
+        self.assertEqual(self.logs(), [])
+
+    def test_stats(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.run_ctl(['go'])
+        st1 = self.state; self.state = os.path.join(self.t, 'state2')
+        self.run_ctl(['stop'])
+        p = subprocess.run([sys.executable, CTL, '--stats'], cwd=self.repo, capture_output=True, text=True, env=self.env)
+        self.assertIn('2 runs', p.stdout); self.assertIn('approved 1', p.stdout); self.assertIn('stopped by you 1', p.stdout)
+        self.assertIn('in round 1: 1', p.stdout)
+
+    def test_report(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=RC_Q, implement_2=IMPL, review_2=APPROVE)
+        self.run_ctl(['Q1: by name', 'Q1: no body'])
+        p = subprocess.run([sys.executable, CTL, '--report', self.state], cwd=self.repo, capture_output=True, text=True, env=self.env)
+        r = open(os.path.join(self.state, 'problem-report.md')).read()
+        for x in ('implement v3.16, review v3.38', 'AC1: the list shows the thing', 'AC2: an unknown id returns 404',
+                  'Stop 1 (the handoff): questions asked: Q1 should the thing be sorted?', 'you replied: Q1: by name',
+                  'Stop 2 (the round 1 review questions): questions asked: Q1 should 404 include a body?', 'you replied: Q1: no body',
+                  'Round 1: - **Verdict:** Request changes', 'Edit items: 1', 'Round 2: - **Verdict:** Approve', 'Edit items: 0',
+                  'Result:              Approved', 'What went wrong:'):
+            self.assertIn(x, r)
+        self.assertIn('replace names', p.stdout)
+
+    # --- resume ---
+    def resume(self, replies, run=None):
+        return self.run_ctl(replies, extra=('--resume', run or self.state), state=False)
+
+    def test_resume_after_stop_at_handoff(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.assertEqual(self.run_ctl(['stop']), ['investigate'])
+        self.assertIn('--resume', self.final)
+        seq = self.resume(['Q1: by name'])            # investigate-2.md does not exist: a live investigate would fail
+        self.assertEqual(seq, ['investigate', 'implement', 'review'])
+        self.assertIn('Approved', self.final)
+        self.assertIn('resumed: investigate (saved result)', self.out)
+        self.assertIn('Q1: by name', self.prompts('implement')[0])
+        self.assertEqual(len(self.logs()), 2); self.assertEqual(self.logs()[-1]['resumed'], 1)
+
+    def test_resume_after_review_question_stop_keeps_answers(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=RC_Q, implement_2=IMPL, review_2=APPROVE)
+        self.run_ctl(['Q1: by name', 'stop'])
+        seq = self.resume(['Q1: no body'])
+        self.assertEqual(seq, ['investigate', 'implement', 'review', 'implement', 'review'])
+        for p in self.prompts('implement')[1:] + self.prompts('review')[1:]:
+            self.assertIn('Q1: by name', p); self.assertIn('Q1: no body', p)
+        self.assertIn('Approved', self.final)
+
+    def test_resume_twice(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=RC_Q, implement_2=IMPL, review_2=APPROVE)
+        self.run_ctl(['stop'])
+        self.resume(['Q1: by name', 'stop'])
+        seq = self.resume(['Q1: no body'])
+        self.assertEqual(seq, ['investigate', 'implement', 'review', 'implement', 'review'])
+        self.assertIn('Approved', self.final)
+
+    def test_resume_after_outage(self):
+        self.agents(investigate_1=HANDOFF, review_1=APPROVE)       # implement-1 and implement-2 return nothing
+        self.run_ctl(['go'])
+        self.assertIn('failed twice', self.final)
+        self.agents(implement_3=IMPL)
+        seq = self.resume([])                                       # no stop is replayed or asked
+        self.assertEqual(seq, ['investigate', 'implement', 'review'])
+        self.assertIn('Approved', self.final)
+
+    def test_resume_after_interrupt_asks_before_rerunning_implement(self):
+        self.agents(investigate_1=HANDOFF, implement_1_sh='echo half >> Foo.java; kill -INT $PPID; sleep 2',
+                    implement_2=IMPL, review_1=APPROVE)
+        self.run_ctl(['go'])
+        self.assertEqual(self.rc, 130, self.out)
+        self.assertIn('--resume', self.out)
+        self.assertEqual(self.logs()[-1]['outcome'], 'interrupted')
+        self.resume(['stop'])
+        self.assertIn('Stopped at the resume of an interrupted step', self.final)
+        stop = open(os.path.join(self.state, 'stop-resume.md')).read()
+        self.assertIn('Foo.java', stop)
+        seq = self.resume(['retry'])
+        self.assertEqual(seq, ['investigate', 'implement', 'review'])
+        self.assertIn('Approved', self.final)
+
+    def test_closed_terminal_is_resumable(self):
+        self.agents(investigate_1=HANDOFF, implement_1_sh='echo half >> Foo.java; kill -HUP $PPID; sleep 2',
+                    implement_2=IMPL, review_1=APPROVE)
+        self.run_ctl(['go'])
+        self.assertEqual(self.rc, 130, self.out)
+        self.assertEqual(self.logs()[-1]['outcome'], 'interrupted')
+        self.assertEqual(self.resume(['retry']), ['investigate', 'implement', 'review'])
+        self.assertIn('Approved', self.final)
+
+    def test_resume_finished_run_refused(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.run_ctl(['go'])
+        self.resume([])
+        self.assertIn('already ended (Approved)', self.out)
+
+    def test_resume_detects_changed_saved_run(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=RC_Q, implement_2=IMPL, review_2=APPROVE)
+        self.run_ctl(['go', 'stop'])
+        jp = os.path.join(self.state, 'journal.jsonl')
+        j = [json.loads(l) for l in open(jp)]
+        for e in j:
+            if e['type'] == 'task' and e['label'] == 'investigate': e['result'] += '\nedited'
+        open(jp, 'w').write(''.join(json.dumps(e) + '\n' for e in j))
+        self.resume(['Q1: no body'])
+        self.assertIn('Cannot resume', self.out)
+
+    def test_resume_last(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.run_ctl(['stop'], state=False)
+        seq = self.run_ctl(['go'], extra=('--resume', 'last'), state=False)
+        self.assertIn('resumed: investigate (saved result)', self.out)
+        self.assertIn('Approved', self.out)
 
 @unittest.skipIf(sc is None, 'controller not importable')
 class Helpers(unittest.TestCase):

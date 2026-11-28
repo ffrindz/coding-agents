@@ -25,13 +25,22 @@ Everything (prompts, reports, your replies, the final report) is saved under <gi
 outside the working tree, so the agents never see it and nothing is committed.
 Options: --base <branch> for review (default HEAD; resolved to a commit at the start), --cap <credits per agent
 run> (default 300), --no-open.
+Run log: each run adds one line to ~/.story-ctl/runs.jsonl (on your machine only; --log FILE, $STORY_CTL_LOG,
+or --no-log); --stats summarises it (outcomes, rounds, credits per agent, minutes). Credits and time so far are
+shown at every stop and in the final report.
+--resume RUN (a run folder, or "last") continues a run that was interrupted (Ctrl-C, a closed terminal), that you
+stopped at a stop, or whose agent step failed twice (a service outage): finished steps and your replies are
+replayed from the run's journal without calling the agents again; an interrupted implement step asks before it
+runs again over its partial edits.
+--report RUN writes problem-report.md for a run (criteria, each stop's questions and your reply, each round's
+verdict line), ready to neutralise and share when an agent does something wrong.
 Test options: --fake <folder> plays back canned agent replies (<agent>-<k>.md; optional <agent>-<k>.sh runs
-first in the repository, <agent>-<k>.exit gives the exit code); --reply-cmd answers stops from a command.
+first in the repository, <agent>-<k>.exit the exit code, <agent>-<k>.credits the credits); --reply-cmd answers stops from a command.
 Tests: python3 tools/test_story_ctl.py (no Copilot, no credits).
 """
-import argparse, difflib, hashlib, json, os, re, shutil, subprocess, sys, time
+import argparse, difflib, hashlib, json, os, re, shutil, signal, subprocess, sys, time
 
-VERSION = '1.1'
+VERSION = '1.2'
 READ_ONLY_DENY = ['write', 'shell(git push)', 'shell(git commit)', 'shell(git reset)', 'shell(git checkout)',
                   'shell(git stash)', 'shell(git clean)', 'shell(git restore)']
 WRITE_DENY = ['shell(git push)']
@@ -152,22 +161,102 @@ def changed_files():
     _, out = git('status', '--porcelain=v1', '-uall')
     return '\n'.join(out.decode(errors='replace').splitlines()[:30]) or '(no files listed by git status; the staged or unstaged diff changed)'
 
-# ---------- running agents and stops ----------
+# ---------- journal, run log, credits ----------
 
 def save(name, text):
     open(os.path.join(S, name), 'w').write(text)
     return os.path.join(S, name)
 
+def jwrite(entry):
+    """The journal is written as the run goes, so an interrupted or stopped run can be resumed and reported."""
+    with open(os.path.join(S, 'journal.jsonl'), 'a') as f:
+        f.write(json.dumps(entry) + '\n')
+
+def phash(p):
+    return hashlib.sha256(p.encode()).hexdigest()[:16]
+
+def credits_in(log):
+    return sum(float(x) for x in re.findall(r'AI Credits\s+([\d.]+)', log))
+
+def total_credits():
+    return sum(usage.values())
+
+def elapsed():
+    return prev_seconds + (time.monotonic() - t0)
+
+def versions():
+    out = {}
+    for x in trace:
+        if x[0] == 'task':
+            m = re.search(r'\((investigate|implement|review|explain)\s+(v[\d.]+)\)', x[3] or '')
+            if m: out.setdefault(m.group(1), m.group(2))
+    return out
+
+def outcome(result):
+    for pre, o in (('Approved', 'approved'), ('Not approved', 'not approved'), ('Needs answers after', 'not approved'),
+                   ('Stopped early', 'not approved'), ('Stopped at', 'stopped by you'), ('Interrupted', 'interrupted')):
+        if result.startswith(pre): return o
+    return 'stopped (problem)'
+
+def log_path():
+    if a.no_log: return None
+    return a.log or os.environ.get('STORY_CTL_LOG') or os.path.expanduser('~/.story-ctl/runs.jsonl')
+
+def write_log(result):
+    p = log_path()
+    if not p: return
+    os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
+    e = {'run': os.path.abspath(S), 'version': VERSION, 'started': meta.get('started'), 'ended': time.strftime('%Y-%m-%d %H:%M'),
+         'repo': os.path.basename(ROOT), 'story': meta.get('story_name'), 'result': result.split('\n')[0][:200],
+         'outcome': outcome(result), 'rounds': len(cur['verdicts']),
+         'verdicts': [v.split(' ')[0] if not v.startswith('invalid') else 'invalid' for v in cur['verdicts']],
+         'replies': sum(1 for x in trace if x[0] == 'user'), 'credits': {k: round(v, 2) for k, v in usage.items()},
+         'credits_total': round(total_credits(), 2), 'minutes': round(elapsed() / 60, 1), 'agents': versions(),
+         'resumed': meta.get('resumed', 0)}
+    with open(p, 'a') as f:
+        f.write(json.dumps(e) + '\n')
+
+# ---------- running agents and stops ----------
+
+def replay_next(kind):
+    """During --resume: the next saved entry of this kind, or None once the saved run is used up."""
+    global replay_i
+    while replay_i < len(replay) and replay[replay_i]['type'] in ('start', 'session'):
+        replay_i += 1
+    if replay_i >= len(replay): return None
+    e = replay[replay_i]
+    if e['type'] != kind:
+        sys.exit(f'Cannot resume: the saved run has a {e["type"]} where this run expects a {kind}. Start a new run.')
+    replay_i += 1
+    return e
+
 def run_agent(agent, prompt, label, read_only):
     """One fresh copilot session; returns (final message, exit code). Retries once when nothing came back,
     unless the working tree changed during the failed attempt."""
-    global step
+    global step, pending
+    saved = replay_next('task')
+    if saved is not None:
+        if saved['agent'] != agent or saved['label'] != label or saved['phash'] != phash(prompt):
+            sys.exit(f'Cannot resume: the saved {saved["label"]} step does not match this run ({label}). Start a new run.')
+        step += saved['attempts']; usage[agent] = usage.get(agent, 0) + saved['credits']
+        trace.append(['task', agent, prompt, saved['result'], [], saved['code']])
+        print(f'[story-ctl] resumed: {label} (saved result)')
+        return saved['result'], saved['code']
+    if pending and pending['label'] == label and not pending['read_only']:
+        r = ask(f'{agent} ({label}) was interrupted while it was running, so it may have left partial edits. Files changed '
+                f'now:\n{changed_files()}\n\nReply "retry" to run that step again over the current files, or "stop".',
+                'resume', 'the resume of an interrupted step', record=False)
+        if not re.fullmatch(r'\s*(retry|go)\.?\s*', r, re.I):
+            stop_with(f'Stopped at the resume of an interrupted step (reply was not "retry")', resumable=True)
+    pending = None
     deny = READ_ONLY_DENY if read_only else WRITE_DENY
+    spent, t_start = 0.0, time.monotonic()
     for attempt in (1, 2):
         step += 1
         pf = save(f'{step:02d}-{label}.prompt.md', prompt)
         before = snapshot()
-        final, tools, code = '', [], 0
+        final, tools, code, cr = '', [], 0, 0.0
+        jwrite({'type': 'start', 'agent': agent, 'label': label, 'read_only': read_only})
         if a.fake:
             k = fake_count[agent] = fake_count.get(agent, 0) + 1
             base = os.path.join(os.path.abspath(a.fake), f'{agent}-{k}')
@@ -175,6 +264,8 @@ def run_agent(agent, prompt, label, read_only):
                 subprocess.run(['sh', base + '.sh'], cwd=ROOT)
             if os.path.exists(base + '.exit'):
                 code = int(open(base + '.exit').read().strip() or 0)
+            if os.path.exists(base + '.credits'):
+                cr = float(open(base + '.credits').read().strip() or 0)
             final = open(base + '.md').read().strip() if os.path.exists(base + '.md') else ''
             if not final: print(f'[story-ctl] fake: no {base}.md', file=sys.stderr)
         else:
@@ -184,6 +275,7 @@ def run_agent(agent, prompt, label, read_only):
             out = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
             code = out.returncode
             log = out.stdout + out.stderr; save(f'{step:02d}-{label}.stdout.txt', log)
+            cr = credits_in(log)
             sid = (re.findall(r'resume=([0-9a-f-]+)', log) or [None])[-1]
             ev = os.path.expanduser(f'~/.copilot/session-state/{sid}/events.jsonl') if sid else None
             if ev and os.path.exists(ev):
@@ -196,10 +288,14 @@ def run_agent(agent, prompt, label, read_only):
                     if e.get('type') == 'tool.execution_start':
                         tools.append(d.get('toolName'))
             final = re.sub(r'\n*\[cost:[^\]]*\]\s*$', '', final).strip()
+        spent += cr; usage[agent] = usage.get(agent, 0) + cr
         after = snapshot()
         touched = before is not None and after != before
         trace.append(['task', agent, prompt, final, tools, code])
-        if final: save(f'{step:02d}-{label}.result.md', final)
+        if final:
+            save(f'{step:02d}-{label}.result.md', final)
+            jwrite({'type': 'task', 'agent': agent, 'label': label, 'phash': phash(prompt), 'result': final, 'code': code,
+                    'credits': spent, 'attempts': attempt, 'seconds': round(time.monotonic() - t_start)})
         if read_only and touched:
             stop_with(f'Stopped — the {agent} step changed the working tree, but it must not edit. Nothing was '
                       f'reverted; check these files:\n{changed_files()}')
@@ -210,11 +306,19 @@ def run_agent(agent, prompt, label, read_only):
             stop_with(f'Stopped — the {agent} step returned no report after changing files, so it was not retried '
                       f'over the partial edits. Nothing was reverted; its output is in {S}. Changed files:\n{changed_files()}')
         print(f'\n[story-ctl] {agent} returned nothing (attempt {attempt}, exit code {code}); see {pf}', file=sys.stderr)
-    stop_with(f'Stopped — the {agent} step failed twice; its output is in {S}.')
+    stop_with(f'Stopped — the {agent} step failed twice; its output is in {S}. When the service is back, resume with '
+              f'--resume {S}', resumable=True)
 
-def ask(text, n, where):
+def ask(text, n, where, asked='', record=True):
     """Show a stop and get the developer's reply. An empty reply, end of input, "stop" or a failed reply
-    command ends the run here."""
+    command ends the run here (it can be resumed at this stop later)."""
+    if record:
+        saved = replay_next('reply')
+        if saved is not None:
+            trace.append(['reply', text]); trace.append(['user', saved['text']])
+            print(f'[story-ctl] resumed: your reply at {where} (saved)')
+            return saved['text']
+    text = text + f'\n\n(so far: {total_credits():.0f} credits, {elapsed() / 60:.0f} min)'
     shown = re.sub(r'\]\((?!https?:|/|#|mailto:)([^)\s]+)\)', lambda m: f']({ROOT}/{m.group(1)})', text)
     stop_file = save(f'stop-{n}.md', shown)
     print('\n' + '=' * 78 + '\n' + text + '\n' + '=' * 78)
@@ -235,9 +339,12 @@ def ask(text, n, where):
             lines.append(l.rstrip('\n'))
         r = '\n'.join(lines).strip()
     trace.append(['reply', text]); trace.append(['user', r]); save(f'reply-{n}.md', r)
-    if failed or is_stop(r):
+    if record:
+        jwrite({'type': 'reply', 'where': where, 'asked': asked, 'text': r, 'failed': failed})
+    if record and (failed or is_stop(r)):
         why = failed or ('no reply' if not r.strip() else 'you')
-        stop_with(f'Stopped at {where} ({why}); nothing further was changed')
+        stop_with(f'Stopped at {where} ({why}); nothing further was changed. To continue from this stop later: '
+                  f'--resume {S}', resumable=True, by_reply=True)
     return r
 
 def answers_block():
@@ -249,10 +356,12 @@ def answer_question(q, context, what):
     ans, _ = run_agent(a.explain_agent, f'A developer reviewing this {what} asks (verbatim): {q}\n\nAnswer the question from the code and the {what} below. Do not change anything, and do not plan new work.\n\n{what.capitalize()}:\n{context}', 'explain-question', True)
     return ans
 
-def stop_with(result):
+def stop_with(result, resumable=False, by_reply=False):
     impl, rev, rounds = cur['impl'], cur['rev'], cur['verdicts']
+    by = ', '.join(f'{k} {v:.0f}' for k, v in usage.items())
     rep = [f'# Story (story-ctl v{VERSION})', f'- **Result:** {result}',
-           f'- **Rounds:** {len(rounds)} implement + review rounds; ' + '; '.join(f'round {i+1}: {v}' for i, v in enumerate(rounds))]
+           f'- **Rounds:** {len(rounds)} implement + review rounds; ' + '; '.join(f'round {i+1}: {v}' for i, v in enumerate(rounds)),
+           f'- **Credits and time:** {total_credits():.0f} credits ({by or "none"}); {elapsed() / 60:.0f} min']
     if rev:
         rep += ['- **Criteria:**\n' + field(rev, 'Criteria'),
                 '- **Open items:**', '  - Findings: ' + (field(rev, 'Findings') or 'none'),
@@ -267,52 +376,200 @@ def stop_with(result):
     final = '\n'.join(rep)
     save('final.md', final); trace.append(['reply', final])
     json.dump(trace, open(os.path.join(S, 'trace.json'), 'w'))
-    print('\n' + final + f'\n\n[story-ctl] everything is saved in {S}')
+    jwrite({'type': 'end', 'result': result, 'resumable': resumable, 'by_reply': by_reply})
+    jwrite({'type': 'session', 'seconds': round(time.monotonic() - t0)})
+    write_log(result)
+    print('\n' + final + f'\n\n[story-ctl] everything is saved in {S}; a problem report for this run: --report {S}')
     sys.exit(0)
+
+# ---------- resume, report and stats ----------
+
+def runs_dir():
+    _, gd = git('rev-parse', '--absolute-git-dir')
+    return os.path.join(gd.decode().strip() or os.path.join(ROOT, '.git'), 'story-ctl')
+
+def resolve_run(x):
+    if x != 'last': return x
+    d = runs_dir()
+    runs = sorted((p for p in (os.path.join(d, n) for n in (os.listdir(d) if os.path.isdir(d) else []))
+                   if os.path.exists(os.path.join(p, 'meta.json'))), key=os.path.getmtime)
+    if not runs: sys.exit(f'No saved runs in {d}.')
+    return runs[-1]
+
+def load_journal(d):
+    p = os.path.join(d, 'journal.jsonl')
+    return [json.loads(l) for l in open(p)] if os.path.exists(p) else []
+
+def prepare_resume(d):
+    """Cut the saved journal back to the point where the run can go on. Returns (entries, interrupted step)."""
+    j = load_journal(d)
+    ends = [i for i, e in enumerate(j) if e['type'] == 'end']
+    if ends:
+        e = j[ends[-1]]
+        if not e['resumable']:
+            sys.exit(f'This run already ended ({e["result"].splitlines()[0]}); there is nothing to resume. Start a new run.')
+        cut = ends[-1]
+        if e['by_reply']:
+            cut = max(i for i in range(cut) if j[i]['type'] == 'reply')
+        j = j[:cut] + [x for x in j[cut:] if x['type'] == 'session']
+    last_done = max([i for i, e in enumerate(j) if e['type'] in ('task', 'reply')] or [-1])
+    starts = [e for e in j[last_done + 1:] if e['type'] == 'start']
+    interrupted = starts[-1] if starts and not ends else None     # killed mid-step (no end written)
+    os.replace(os.path.join(d, 'journal.jsonl'), os.path.join(d, 'journal.prev.jsonl'))
+    with open(os.path.join(d, 'journal.jsonl'), 'w') as f:
+        for e in j: f.write(json.dumps(e) + '\n')
+    return j, interrupted
+
+def report(d):
+    m = json.load(open(os.path.join(d, 'meta.json'))); j = load_journal(d)
+    tasks = [e for e in j if e['type'] == 'task']
+    vers = {}
+    for t in tasks:
+        v = re.search(r'\((investigate|implement|review|explain)\s+(v[\d.]+)\)', t['result'])
+        if v: vers.setdefault(v.group(1), v.group(2))
+    ends = [e for e in j if e['type'] == 'end']
+    cr = sum(t['credits'] for t in tasks)
+    L = ['# Problem report (story-ctl)', '',
+         'Before sharing: replace system, service, field and people names with neutral ones (for example "Orders service",',
+         '"field A"), but keep the shape: the wording of the criteria, your replies and the verdict lines. Then fill in the',
+         'last three lines.', '', '```text',
+         f'Agent and version:   ' + ', '.join(f'{k} {v}' for k, v in vers.items()) + f' (story-ctl v{m.get("version")})',
+         'Model / effort:      (only if you changed the model lines in the agent files)',
+         'Where:               Copilot CLI (story-ctl)',
+         f'Result:              {ends[-1]["result"].splitlines()[0] if ends else "interrupted (no result)"}',
+         f'Credits:             {cr:.0f} over {len(tasks)} agent runs', '',
+         'Story shape (criteria as given):'] + ['  ' + l for l in parse_criteria(m['story_text']).splitlines()]
+    L += ['', 'What the agents showed at each stop, and what you replied:']
+    k = 0
+    for e in j:
+        if e['type'] == 'task':
+            if e['label'] == 'explain-question':
+                L.append(f'    explain answered: {re.sub(chr(10) + "+", " ", e["result"])[:300]}')
+        if e['type'] == 'reply':
+            k += 1
+            asked = re.sub(r'\s+', ' ', e.get('asked') or '').strip() or '(none listed)'
+            L.append(f'  Stop {k} ({e["where"]}): questions asked: {asked}')
+            L.append(f'    you replied: {e["text"] or "(nothing)"}' + (f' [{e["failed"]}]' if e.get('failed') else ''))
+    L += ['', "Each round's review:"]
+    rn = 0
+    for t in tasks:
+        if t['label'].startswith('review-r'):
+            rn += 1
+            ed = field(t['result'], 'Edit')
+            items = len([l for l in ed.splitlines() if re.match(r'\s*([-*]|\d+[.)])\s', l)]) or (0 if re.match(r'^(none|n/a)?\s*$', ed, re.I) else 1)
+            L.append(f'  Round {rn}: {verdict_line(t["result"])}   Edit items: {items}')
+    L += ['', 'What went wrong:', 'What you expected:', 'Did the code end up correct?   yes | no | not checked', '```']
+    out = os.path.join(d, 'problem-report.md')
+    open(out, 'w').write('\n'.join(L) + '\n')
+    print(f'Problem report: {out}\nIt contains your story text and replies: replace names before sharing it.')
+
+def stats():
+    p = log_path()
+    if not p or not os.path.exists(p): sys.exit('No run log yet.')
+    runs = {}
+    for l in open(p):
+        try: e = json.loads(l)
+        except ValueError: continue
+        runs[e['run']] = e                      # a resumed run keeps its last line
+    rs = list(runs.values())
+    if not rs: sys.exit('No runs in the log.')
+    n = len(rs); by = {}
+    for e in rs: by[e['outcome']] = by.get(e['outcome'], 0) + 1
+    ap_ = [e for e in rs if e['outcome'] == 'approved']
+    avg = lambda xs: sum(xs) / len(xs) if xs else 0
+    per = {}
+    for e in rs:
+        for k, v in e['credits'].items(): per.setdefault(k, []).append(v)
+    print(f'{n} runs in {p}')
+    print('  outcomes: ' + ', '.join(f'{k} {v}' for k, v in sorted(by.items(), key=lambda x: -x[1])))
+    if ap_:
+        print(f'  approved: {len(ap_)} of {n}; in round 1: {sum(1 for e in ap_ if e["rounds"] == 1)}; average rounds {avg([e["rounds"] for e in ap_]):.1f}')
+    print(f'  credits per run: average {avg([e["credits_total"] for e in rs]):.0f} (' + ', '.join(f'{k} {avg(v):.0f}' for k, v in per.items()) + ')')
+    print(f'  minutes per run: average {avg([e["minutes"] for e in rs]):.0f}; replies per run: {avg([e["replies"] for e in rs]):.1f}')
+    print('  last runs:')
+    for e in sorted(rs, key=lambda e: e.get('ended') or '')[-10:]:
+        print(f'    {e.get("ended")}  {e["repo"]:<18.18} {e.get("story") or "":<22.22} {e["outcome"]:<16} rounds {e["rounds"]}  {e["credits_total"]:.0f} cr')
 
 # ---------- the workflow ----------
 
 def main(argv=None):
-    global a, ROOT, S, trace, answers, step, fake_count, cur
+    global a, ROOT, S, trace, answers, step, fake_count, cur, usage, t0, prev_seconds, replay, replay_i, pending, meta
     ap = argparse.ArgumentParser()
-    ap.add_argument('story'); ap.add_argument('--base', default='HEAD'); ap.add_argument('--reply-cmd')
+    ap.add_argument('story', nargs='?'); ap.add_argument('--base', default='HEAD'); ap.add_argument('--reply-cmd')
     ap.add_argument('--cap', type=int, default=300); ap.add_argument('--state')
     ap.add_argument('--agents', default='investigate,implement,review', help='agent names: investigate,implement,review')
     ap.add_argument('--explain-agent', default='explain', help='read-only agent that answers questions asked at a stop')
     ap.add_argument('--no-open', action='store_true', help='do not open each stop in VS Code')
+    ap.add_argument('--resume', metavar='RUN', help='continue a stopped or interrupted run (its folder, or "last")')
+    ap.add_argument('--report', metavar='RUN', help='write a problem report for a run (its folder, or "last")')
+    ap.add_argument('--stats', action='store_true', help='summarise the run log')
+    ap.add_argument('--log', help='run log file (default ~/.story-ctl/runs.jsonl, or $STORY_CTL_LOG)')
+    ap.add_argument('--no-log', action='store_true', help='do not add this run to the run log')
     ap.add_argument('--fake', help='test mode: play back <agent>-<k>.md files from this folder instead of calling copilot')
     a = ap.parse_args(argv)
-    INV, IMP, REV = a.agents.split(',')
     ROOT = os.getcwd()
-    fake_count, trace, answers, step = {}, [], [], 0
+    if a.stats: return stats()
+    if a.report: return report(resolve_run(a.report))
+    fake_count, trace, answers, step, usage = {}, [], [], 0, {}
     cur = {'impl': None, 'rev': None, 'verdicts': [], 'handoff': None}
-    story = open(a.story).read().strip()
+    t0, prev_seconds, replay, replay_i, pending = time.monotonic(), 0.0, [], 0, None
+    if a.resume:
+        S = resolve_run(a.resume)
+        meta = json.load(open(os.path.join(S, 'meta.json')))
+        replay, interrupted = prepare_resume(S)
+        prev_seconds = sum(e['seconds'] for e in replay if e['type'] == 'session')
+        for e in replay:
+            if e['type'] == 'start': fake_count[e['agent']] = fake_count.get(e['agent'], 0) + 1
+        pending = interrupted
+        meta['resumed'] = meta.get('resumed', 0) + 1
+        json.dump(meta, open(os.path.join(S, 'meta.json'), 'w'))
+        story, base_desc = meta['story_text'], meta['base_desc']
+        INV, IMP, REV = meta['agents']; a.explain_agent = meta['explain_agent']; a.cap = meta['cap']
+        print(f'[story-ctl] resuming {S}' + (f' (the {interrupted["label"]} step was interrupted)' if interrupted else ''))
+    else:
+        if not a.story: ap.error('a story file is needed (or --resume, --report, --stats)')
+        INV, IMP, REV = a.agents.split(',')
+        story = open(a.story).read().strip()
+        rc, out = git('rev-parse', '--verify', '--quiet', a.base + '^{commit}')
+        if rc:
+            sys.exit(f'--base {a.base} is not a commit in this repository (run story-ctl from the repository root).')
+        base_sha = out.decode().strip()
+        base_desc = base_sha if a.base == base_sha else f'{base_sha} ({a.base} when the run started)'
+        S = a.state or os.path.join(runs_dir(), time.strftime('%Y%m%d-%H%M%S'))
+        os.makedirs(S, exist_ok=True)
+        meta = {'version': VERSION, 'started': time.strftime('%Y-%m-%d %H:%M'), 'story_text': story,
+                'story_name': os.path.basename(a.story), 'base_desc': base_desc, 'agents': [INV, IMP, REV],
+                'explain_agent': a.explain_agent, 'cap': a.cap, 'resumed': 0}
+        json.dump(meta, open(os.path.join(S, 'meta.json'), 'w'))
     criteria = parse_criteria(story)
     if not criteria:
         sys.exit('No acceptance criteria (lines starting "AC1:") found in the story file.')
-    rc, out = git('rev-parse', '--verify', '--quiet', a.base + '^{commit}')
-    if rc:
-        sys.exit(f'--base {a.base} is not a commit in this repository (run story-ctl from the repository root).')
-    base_sha = out.decode().strip()
-    base_desc = base_sha if a.base == base_sha else f'{base_sha} ({a.base} when the run started)'
-    if a.state:
-        S = a.state
-    else:
-        _, gd = git('rev-parse', '--absolute-git-dir')
-        S = os.path.join(gd.decode().strip() or os.path.join(ROOT, '.git'), 'story-ctl', time.strftime('%Y%m%d-%H%M%S'))
-    os.makedirs(S, exist_ok=True)
+    def _interrupt(signum, frame):
+        raise KeyboardInterrupt
+    for sig in (signal.SIGTERM, getattr(signal, 'SIGHUP', None)):   # a closed terminal or a kill is handled like Ctrl-C
+        if sig is not None: signal.signal(sig, _interrupt)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        workflow(story, criteria, base_desc, INV, IMP, REV)
+    except KeyboardInterrupt:
+        jwrite({'type': 'session', 'seconds': round(time.monotonic() - t0)})
+        write_log('Interrupted')
+        print(f'\n[story-ctl] interrupted; everything so far is saved. To continue: --resume {S}', file=sys.stderr)
+        sys.exit(130)
 
+def workflow(story, criteria, base_desc, INV, IMP, REV):
     # 1. investigate, then stop for the developer
     answers_q = []
     handoff, _ = run_agent(INV, 'Story mode\n\n' + story, 'investigate', True)
     cur['handoff'] = handoff
     while True:
+        hq = field(handoff, 'Questions for the analyst')
         r = ask(handoff + '\n\nReply go to implement, answer the questions above (implement and review will use your answers), '
-                'start your reply with "Change the plan:" to have investigate plan again, or reply stop.', 1 if not answers else len(answers) + 1, 'the handoff')
+                'start your reply with "Change the plan:" to have investigate plan again, or reply stop.', 1 if not answers else len(answers) + 1, 'the handoff', hq)
         while is_question(r):
             handoff_note = answer_question(r, handoff, 'plan')
             answers_q.append((r, handoff_note))
-            r = ask('Answer to your question:\n\n' + handoff_note + '\n\n---\n\n' + handoff + '\n\nReply go to implement, answer the questions above, start your reply with "Change the plan:", or reply stop.', f'h{len(answers_q)}', 'the handoff')
+            r = ask('Answer to your question:\n\n' + handoff_note + '\n\n---\n\n' + handoff + '\n\nReply go to implement, answer the questions above, start your reply with "Change the plan:", or reply stop.', f'h{len(answers_q)}', 'the handoff', hq)
         if re.match(r'\s*change the plan\b', r, re.I):
             handoff, _ = run_agent(INV, f'Story mode\n\n{story}\n\nPrevious handoff:\n{handoff}\n\nChanges from the user (verbatim):\n{r}', 'reinvestigate', True)
             cur['handoff'] = handoff
@@ -356,14 +613,15 @@ def main(argv=None):
             stop_with(f'Stopped early — the round {n} review asks for the same changes as round {n-1}, so another round is unlikely to help; see the last review')
         prev_edit = en
         if asks:
-            shown = verdict_line(rev) + '\n- **Questions for the author or analyst:** ' + field(rev, 'Questions for the author or analyst')
+            rq = field(rev, 'Questions for the author or analyst')
+            shown = verdict_line(rev) + '\n- **Questions for the author or analyst:** ' + rq
             if v == 'Request changes':
                 shown += '\n- **Edit:** ' + field(rev, 'Edit')
             tail = f'\n\nRound {n} of 3. Reply with your answers and I will continue, or reply stop.'
-            r = ask(shown + tail, len(answers) + 2, f'the round {n} review questions')
+            r = ask(shown + tail, len(answers) + 2, f'the round {n} review questions', rq)
             while is_question(r):
                 note = answer_question(r, rev, 'review')
-                r = ask('Answer to your question:\n\n' + note + '\n\n---\n\n' + shown + tail, f'q{n}-{len(answers_q)}', f'the round {n} review questions')
+                r = ask('Answer to your question:\n\n' + note + '\n\n---\n\n' + shown + tail, f'q{n}-{len(answers_q)}', f'the round {n} review questions', rq)
                 answers_q.append((r, note))
             if not is_go(r):
                 answers.append((f'After round {n} review', r))

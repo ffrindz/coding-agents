@@ -74,6 +74,11 @@ Use a fresh chat for each step so each agent starts from the report alone. The h
 
 Everything is saved under `.git/story-ctl/<time>/` (in a linked worktree, under that worktree's git folder; outside the working tree, never committed), so you can reopen any step. `python3 tools/test_story_ctl.py` runs the controller's own tests offline (no Copilot, no credits).
 
+Three commands help with real use:
+- **Continue a run later:** `python3 <path>/story-ctl.py --resume last` (or the run's folder) continues a run you stopped at a stop (`stop`, for example to think about a question), a run that was interrupted (Ctrl-C, a closed terminal, a sleeping laptop), or one whose agent step failed twice (a service outage). Finished steps and your replies are replayed from the run's journal without calling the agents or spending credits again; an implement step that was interrupted mid-way asks before it runs again over its partial edits.
+- **See how it is going:** every run adds one line to `~/.story-ctl/runs.jsonl` on your machine (nothing is sent anywhere; `--no-log` to skip). `python3 <path>/story-ctl.py --stats` shows outcomes, how many runs were approved and in how many rounds, credits per agent and minutes per run. Credits and time so far are also shown at each stop and in the final report.
+- **Report a problem:** `python3 <path>/story-ctl.py --report last` writes `problem-report.md` in the run's folder with the agent versions, the criteria, each stop's questions and your reply, and each round's verdict line. Replace names with neutral ones, fill in the last three lines, and share it so the problem becomes a test.
+
 ### Add a repository instructions file
 
 Copilot reads `.github/copilot-instructions.md` in each repository automatically, in every agent and in plain chat. In tests it cut implement and review rounds from 7 to 5 over 4 stories and credits by about 13%, with the same or better quality. Keep it to about 40 lines, and have your documentation agent maintain it:
