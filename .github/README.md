@@ -8,13 +8,14 @@ Six GitHub Copilot custom agents for working on Angular + Java codebases (Maven 
 | **implement** | Make the change: smallest complete edit, then compile, test, lint and run the full suite. | Yes | GPT-6.1 Sol (falls back to GPT-6 Luna) |
 | **review** | Check the branch against the story's acceptance criteria, one verdict per criterion with code and test evidence. | No (terminal for git and one test run) | GPT-6.1 Sol (falls back to GPT-6 Luna) |
 | **explain** | Answer "how does X work?" in plain language, with cited code and a diagram when useful. | No (read and search, plus read-only GitHub) | GPT-6 Luna |
-| **story** (trial) | Run a whole story: investigate, implement and review as subagents, passing the acceptance criteria and your answers to every round, stopping whenever a review has questions, and repeating fix rounds until review approves or 3 rounds pass. | No (only starts the other agents) | GPT-6 Luna; each subagent uses its own model |
+| **story** | Run a whole story from the agent window: paste it, reply at each stop, get the final report. It only relays to the `story-ctl` workflow controller, which runs investigate, implement and review (up to 3 rounds) and does all the bookkeeping in code. | No (runs only the controller command) | GPT-6 Luna for the relay; each agent uses its own model |
 | **spec** | Turn a UI team's requirement into a spec for a systems analyst: functional and non-functional requirements, our API's contract, which downstream endpoints supply each field, and the field mapping. | No (read, search and GitHub only) | GPT-6 Luna |
 
 ## Prerequisites
 
 **Copilot**
 - VS Code with the GitHub Copilot extension, signed in, with custom agents available in Copilot chat. The Copilot CLI (`copilot`) works too, except for handoff buttons.
+- **For story:** Python 3 (`python3` on macOS and Linux, `py` on Windows), the Copilot CLI installed and signed in (the controller runs the agents through it), and VS Code's `code` command on your PATH so each stop opens in an editor tab by itself (Command Palette → "Shell Command: Install 'code' command in PATH" on macOS; the Windows installer adds it).
 - A Copilot plan whose model list includes **GPT-6 Luna** (all agents) and **GPT-6.1 Sol** (implement and review). Without Sol, implement and review fall back to Luna, which is fine for normal stories but weaker on refactors (see [Models](#models)).
 - **For spec only:** the GitHub MCP server added to VS Code and signed in with an account that can read your organisation's repositories, with these three read-only tools enabled in the tool picker: `get_file_contents`, `search_code`, `search_repositories`. Without it, spec can still map from attached Swagger files but can't check them against the repositories.
 
@@ -33,9 +34,12 @@ Six GitHub Copilot custom agents for working on Angular + Java codebases (Maven 
 
 ## Setup
 
+**Quickest:** download the repository, then from its root run `sh tools/install.sh` (macOS, Linux) or `powershell -ExecutionPolicy Bypass -File tools\install.ps1` (Windows). It copies the agents to your personal agents folder and the workflow controller to `~/.story-ctl/`, and checks that Python, the Copilot CLI and the `code` command are there. Or by hand:
+
 1. Download the six `.agent.md` files from this repository (or the whole repository as a ZIP).
 2. Copy them into the `agents` folder inside your user-level `.copilot` folder, which VS Code and the Copilot CLI both read personal agents from: `~/.copilot/agents` on macOS and Linux, `%USERPROFILE%\.copilot\agents` on Windows. Create the folder if it doesn't exist. Copy only the `.agent.md` files: Copilot tries to load every `.md` file in that folder as an agent.
 3. Restart VS Code (or open a new Copilot chat) and check that the six agents appear in the agent picker.
+4. For story, also copy `tools/story-ctl.py` to `~/.story-ctl/story-ctl.py` (`%USERPROFILE%\.story-ctl\story-ctl.py` on Windows).
 
 **Updating:** download the new `.agent.md` files and replace the old ones. Each report's first line shows the agent version (for example `# Review (review v3.23)`), so you can tell which version produced it; [CHANGELOG.md](CHANGELOG.md) lists what changed.
 
@@ -51,13 +55,35 @@ Six GitHub Copilot custom agents for working on Angular + Java codebases (Maven 
 
 Every implement report starts with the story's acceptance criteria, so the report you paste into review always carries them.
 
-Use a fresh chat for each step so each agent starts from the report alone. The handoff buttons at the end of a reply do this for you in VS Code (the Copilot CLI ignores them).
+Use a fresh chat for each step so each agent starts from the report alone. The handoff buttons at the end of a reply do this for you in VS Code's Local harness; the Copilot harness (VS Code's default from 2026, and the Copilot CLI) ignores them, and VS Code removes the Local harness by February 2027. The story agent below replaces them.
 
-### Run a whole story with the workflow controller (recommended)
+### Run a whole story in the agent window (recommended)
 
-`tools/story-ctl.py` runs investigate, implement and review for you, with you in the loop at the same points as the story agent, but the bookkeeping is code instead of a model: handoffs and reports are passed on byte for byte, all your answers go to every later task, verdicts and rounds are read and counted exactly, and it always stops after the handoff and when a review has questions. In tests it ran 30 stories with no orchestration mistake (the story agent made one in about 1 run in 6). It needs Python 3 and the Copilot CLI.
+1. Open the repository you are changing, start a new chat, pick **story** in the agent dropdown and paste the story with its acceptance criteria (lines starting `AC1:`, `AC2:`, ...; a criterion can continue on indented or bulleted lines below it).
+2. Within seconds it replies "Started". The first time, VS Code asks you to approve the `story-ctl.py --chat` command; allow it for good (for that exact command) so later messages run without a prompt.
+3. When the plan is ready it opens in an editor tab; press Cmd+Shift+V (Ctrl+Shift+V) for the preview, where code links open the files. Reply in the same chat:
 
-1. Copy `tools/story-ctl.py` anywhere (for example next to your agent files).
+   | At | Reply | What happens |
+   |---|---|---|
+   | the handoff | `go`, your answers, or `Change the plan: ...` | implement starts with your answers, or investigate plans again |
+   | any stop | a question ending with `?` | the explain agent answers it, the stop opens again with the answer, and you stay at the stop |
+   | a review with questions | your answers | the next round fixes the Edit items and applies your answers |
+   | implement could not finish a round | `review`, or an instruction for implement | the work goes to review, or implement continues with your instruction |
+   | any stop | `stop` | the run ends there and can be resumed later |
+   | any time | `status` | what is running, credits and minutes so far, or where it is waiting |
+   | after a stop or an interruption | `resume` | continues from the last finished step (in a new chat too: it picks up the last run in this repository) |
+   | any time | `stats`, `report`, `help` | your run statistics, a problem report for this run, the list of replies |
+
+4. implement and review run in the background, at most 3 rounds; a review with questions opens in a tab and waits for your reply. The run keeps going if you close the chat or switch to other work; when it ends, `status` shows the result and links the final report (open items, every handoff question with the assumption used, your answers, the last implement report and the last review).
+5. A new chat is a new story. A message sent while an agent is still working is not used (it says so); send it again when the stop opens.
+
+How it stays reliable: the story agent never orchestrates. For every message it runs one fixed command and shows its output; your message reaches the controller through the agent's own hook (exactly as typed, never retyped by the model), and a second hook denies every other command, so the relay cannot edit files or do the work itself. Handoffs, answers, verdicts and rounds are the workflow controller's code described below. Each chat turn costs the relay about 0.1 credit; the agents cost what they cost from the terminal. If your organisation turns hooks off, the story agent replies that it could not read your message: run the story from the terminal instead.
+
+### Run a whole story from the terminal
+
+`tools/story-ctl.py` is the workflow controller the story agent relays to; you can also run it directly in VS Code's terminal. The bookkeeping is code instead of a model: handoffs and reports are passed on byte for byte, all your answers go to every later task, verdicts and rounds are read and counted exactly, and it always stops after the handoff and when a review has questions. In tests it ran 30 stories with no orchestration mistake (a model-run story agent made one in about 1 run in 6). It needs Python 3 and the Copilot CLI.
+
+1. Install it as in [Setup](#setup) (or copy `tools/story-ctl.py` anywhere).
 2. Save the story with its acceptance criteria (lines starting `AC1:`, `AC2:`, ...; a criterion can continue on indented or bulleted lines below it) in a text file.
 3. In VS Code's terminal, at the root of the repository you are changing: `python3 <path>/story-ctl.py story.txt --base main`
 4. At each stop it prints the agent's text and opens it in VS Code; press Cmd+Shift+V (Ctrl+Shift+V) for the Markdown preview, where code links open the files. Type your reply and finish with an empty line:
@@ -88,28 +114,9 @@ Copilot reads `.github/copilot-instructions.md` in each repository automatically
 - traps the agents should know (test teardown that a new constraint breaks, test transactions that hide database-generated values);
 - that Markdown files are generated by the documentation agent.
 
-### Or let the story agent run the chain (trial)
-
-1. In a new chat, pick **story**, set the effort to **High**, and paste the story with its acceptance criteria. If you already know the answer to an open question, put it in this message.
-2. It runs investigate, shows you the whole handoff and waits. Reply in one of three ways:
-
-   | You want to | Reply | What happens |
-   |---|---|---|
-   | Proceed | `go` | implement starts |
-   | Answer the handoff's questions | your answers, with or without `go` | implement starts; your answers go to implement and to every review |
-   | Change the approach | `Change the plan: ...` | investigate plans again from the previous handoff and waits again |
-
-3. implement and review then run by themselves, at most 3 rounds, each in a subagent with fresh context and its own model. Every implement and review gets your criteria and all your answers so far, exactly as you gave them.
-4. If a review has questions (Needs answers, or Request changes with questions), it stops and shows the verdict, the questions and, for Request changes, the Edit items. Answer in the same chat and it carries on; the next round fixes the Edit items and applies your answers together. You only need to answer the new questions: earlier answers are passed on with them.
-5. The final reply gives the result, each round's verdict, the criteria lines and open items, then the last implement report and the last review in full. If it ends "Not approved after 3 rounds", paste the "Last review" into a new implement chat and continue by hand.
+### Answering questions
 
 Each question shows the options, **If unanswered:** what will be built if you don't answer (existing behavior always stays as today unless a criterion asks for a change), and **Recommendation:** what the agent advises, which is used only if you agree. To take a recommendation, name the question (for example "missing version: use your recommendation"), or answer in your own words.
-
-Notes:
-- Answering at the handoff is cheaper than answering later: in one test it saved a whole implement + review round (2 rounds instead of 3).
-- Include the words "without stopping" in your first message to skip the handoff stop.
-- Each subagent uses the model in its own agent file, but the effort you pick for story applies to all of them. Pick High, so implement and review run Sol at the effort they were tested with.
-- Use the manual chain instead when you want to read or edit each step, for example on refactors.
 
 ### Writing a spec
 

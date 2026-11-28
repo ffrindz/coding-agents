@@ -40,7 +40,7 @@ Tests: python3 tools/test_story_ctl.py (no Copilot, no credits).
 """
 import argparse, difflib, hashlib, json, os, re, shutil, signal, subprocess, sys, time
 
-VERSION = '1.2'
+VERSION = '1.3'
 READ_ONLY_DENY = ['write', 'shell(git push)', 'shell(git commit)', 'shell(git reset)', 'shell(git checkout)',
                   'shell(git stash)', 'shell(git clean)', 'shell(git restore)']
 WRITE_DENY = ['shell(git push)']
@@ -246,9 +246,10 @@ def run_agent(agent, prompt, label, read_only):
         r = ask(f'{agent} ({label}) was interrupted while it was running, so it may have left partial edits. Files changed '
                 f'now:\n{changed_files()}\n\nReply "retry" to run that step again over the current files, or "stop".',
                 'resume', 'the resume of an interrupted step', record=False)
-        if not re.fullmatch(r'\s*(retry|go)\.?\s*', r, re.I):
+        if not re.fullmatch(r'\s*(retry|go|resume|continue)\.?\s*', r, re.I):
             stop_with(f'Stopped at the resume of an interrupted step (reply was not "retry")', resumable=True)
     pending = None
+    set_status('running', step=label, agent=agent)
     deny = READ_ONLY_DENY if read_only else WRITE_DENY
     spent, t_start = 0.0, time.monotonic()
     for attempt in (1, 2):
@@ -311,7 +312,9 @@ def run_agent(agent, prompt, label, read_only):
 
 def ask(text, n, where, asked='', record=True):
     """Show a stop and get the developer's reply. An empty reply, end of input, "stop" or a failed reply
-    command ends the run here (it can be resumed at this stop later)."""
+    command ends the run here (it can be resumed at this stop later). In chat mode (--step) the run pauses
+    here instead, and the next chat message resumes it with --reply-file."""
+    global reply_text
     if record:
         saved = replay_next('reply')
         if saved is not None:
@@ -321,31 +324,53 @@ def ask(text, n, where, asked='', record=True):
     text = text + f'\n\n(so far: {total_credits():.0f} credits, {elapsed() / 60:.0f} min)'
     shown = re.sub(r'\]\((?!https?:|/|#|mailto:)([^)\s]+)\)', lambda m: f']({ROOT}/{m.group(1)})', text)
     stop_file = save(f'stop-{n}.md', shown)
-    print('\n' + '=' * 78 + '\n' + text + '\n' + '=' * 78)
-    print(f'[story-ctl] this stop is also in {stop_file} (Markdown preview: Cmd+Shift+V; links open the code)')
-    if not a.reply_cmd and not a.no_open and shutil.which('code'):
-        subprocess.run(['code', '-r', stop_file])
     failed = ''
-    if a.reply_cmd:
-        p = subprocess.run(a.reply_cmd.format(stop_file=stop_file, n=n), shell=True, capture_output=True, text=True)
-        r = p.stdout.strip()
-        if p.returncode: failed = f'the reply command exited with code {p.returncode}'
-        print(f'[reply] {r}')
+    if reply_text is not None:                  # chat mode: the developer's message, captured by the hook
+        r, reply_text = reply_text, None
+        print(f'[story-ctl] your reply at {where} (from the chat)')
+    elif a.step:                                # chat mode: pause; the next chat message resumes the run
+        open_in_editor(stop_file)
+        jwrite({'type': 'session', 'seconds': round(time.monotonic() - t0)})
+        set_status('paused', where=where, stop_file=stop_file)
+        print(f'[story-ctl] paused at {where}: {stop_file}')
+        sys.exit(10)
     else:
-        print('Your reply (empty line to finish; "stop" to end the run):')
-        lines = []
-        for l in sys.stdin:
-            if not l.strip() and lines: break
-            lines.append(l.rstrip('\n'))
-        r = '\n'.join(lines).strip()
+        print('\n' + '=' * 78 + '\n' + text + '\n' + '=' * 78)
+        print(f'[story-ctl] this stop is also in {stop_file} (Markdown preview: Cmd+Shift+V; links open the code)')
+        if a.reply_cmd:
+            p = subprocess.run(a.reply_cmd.format(stop_file=stop_file, n=n), shell=True, capture_output=True, text=True)
+            r = p.stdout.strip()
+            if p.returncode: failed = f'the reply command exited with code {p.returncode}'
+            print(f'[reply] {r}')
+        else:
+            open_in_editor(stop_file)
+            print('Your reply (empty line to finish; "stop" to end the run):')
+            lines = []
+            for l in sys.stdin:
+                if not l.strip() and lines: break
+                lines.append(l.rstrip('\n'))
+            r = '\n'.join(lines).strip()
     trace.append(['reply', text]); trace.append(['user', r]); save(f'reply-{n}.md', r)
     if record:
         jwrite({'type': 'reply', 'where': where, 'asked': asked, 'text': r, 'failed': failed})
     if record and (failed or is_stop(r)):
         why = failed or ('no reply' if not r.strip() else 'you')
         stop_with(f'Stopped at {where} ({why}); nothing further was changed. To continue from this stop later: '
-                  f'--resume {S}', resumable=True, by_reply=True)
+                  + ('reply resume in the chat' if a.step else f'--resume {S}'), resumable=True, by_reply=True)
     return r
+
+def open_in_editor(path):
+    if a.no_open: return
+    ed = os.environ.get('STORY_CTL_EDITOR') or shutil.which('code')
+    if ed:
+        try: subprocess.run([ed, '-r', path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        except (OSError, subprocess.SubprocessError): pass
+
+def set_status(state, **kw):
+    st = {'state': state, 'pid': os.getpid(), 'updated': time.time(), 'credits': round(total_credits(), 1),
+          'minutes': round(elapsed() / 60, 1), **kw}
+    tmp = os.path.join(S, 'status.json.tmp')
+    json.dump(st, open(tmp, 'w')); os.replace(tmp, os.path.join(S, 'status.json'))
 
 def answers_block():
     if not answers: return ''
@@ -379,10 +404,14 @@ def stop_with(result, resumable=False, by_reply=False):
     jwrite({'type': 'end', 'result': result, 'resumable': resumable, 'by_reply': by_reply})
     jwrite({'type': 'session', 'seconds': round(time.monotonic() - t0)})
     write_log(result)
+    set_status('ended', result=result, resumable=resumable, final=os.path.join(S, 'final.md'))
     print('\n' + final + f'\n\n[story-ctl] everything is saved in {S}; a problem report for this run: --report {S}')
     sys.exit(0)
 
 # ---------- resume, report and stats ----------
+
+def new_run_id():
+    return time.strftime('%Y%m%d-%H%M%S') + '-' + os.urandom(2).hex()
 
 def runs_dir():
     _, gd = git('rev-parse', '--absolute-git-dir')
@@ -490,10 +519,213 @@ def stats():
     for e in sorted(rs, key=lambda e: e.get('ended') or '')[-10:]:
         print(f'    {e.get("ended")}  {e["repo"]:<18.18} {e.get("story") or "":<22.22} {e["outcome"]:<16} rounds {e["rounds"]}  {e["credits_total"]:.0f} cr')
 
+# ---------- chat mode: the story agent in the VS Code agent window (or Copilot CLI) ----------
+#
+# The story agent runs one command, `story-ctl.py --chat`, for every message and shows its output. Your message
+# reaches the controller through the agent's userPromptSubmitted hook (--hook-prompt), never through the model;
+# its preToolUse hook (--hook-guard) denies every other command. --chat starts or continues the run in the
+# background and returns at once; each stop opens in an editor tab, and your next chat message is the reply.
+
+CHAT_HELP = ('Paste a story with its acceptance criteria (lines starting "AC1:", "AC2:", ...) to start. At each stop '
+             'the plan or review opens in an editor tab; reply here with `go`, your answers, a question ending in `?`, '
+             'or `stop`. Other messages: `status`, `resume` (continue the last stopped run in this repository), '
+             '`stats`, `report`.')
+CHAT_CMD = re.compile(r'''^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)?(?:python3?|py)(?:\s+-I)?\s+(?:"[^"]*story-ctl\.py"|'[^']*story-ctl\.py'|[^"'\s;&|<>`$()]*story-ctl\.py|"\$env:[^"]*story-ctl\.py")\s+--chat\s*(?:2>&1)?\s*$''')
+READ_ONLY_TOOLS = {'read_bash', 'list_bash', 'get_terminal_output', 'read_powershell', 'list_powershell'}
+
+def home():
+    return os.environ.get('STORY_CTL_HOME') or os.path.expanduser('~/.story-ctl')
+
+def hook_input():
+    try: return json.loads(sys.stdin.read() or '{}')
+    except ValueError: return {}
+
+def hook_prompt():
+    """userPromptSubmitted hook of the story agent: keep the developer's exact message for --chat."""
+    d = hook_input()
+    sid = re.sub(r'[^\w.-]', '_', str(d.get('sessionId') or d.get('session_id') or 'unknown'))
+    prompt = d.get('prompt') if 'prompt' in d else d.get('user_prompt')
+    if prompt is None: return
+    os.makedirs(os.path.join(home(), 'inbox'), exist_ok=True)
+    tmp = os.path.join(home(), 'inbox', sid + '.tmp')
+    json.dump({'sessionId': sid, 'prompt': prompt, 'cwd': d.get('cwd') or os.getcwd(), 'ts': time.time()}, open(tmp, 'w'))
+    os.replace(tmp, os.path.join(home(), 'inbox', sid + '.json'))
+
+def hook_guard():
+    """preToolUse hook of the story agent: allow only the story-ctl --chat command."""
+    d = hook_input()
+    name = str(d.get('toolName') or d.get('tool_name') or '')
+    args = d.get('toolArgs') if 'toolArgs' in d else d.get('tool_input')
+    if isinstance(args, str):
+        try: args = json.loads(args)
+        except ValueError: args = {'command': args}
+    cmd = (args or {}).get('command') if isinstance(args, dict) else None
+    if name in READ_ONLY_TOOLS or (isinstance(cmd, str) and CHAT_CMD.match(cmd)):
+        print('{}'); return
+    print(json.dumps({'permissionDecision': 'deny', 'permissionDecisionReason':
+                      'The story agent may only run the story-ctl --chat command shown in its instructions.'}))
+
+def read_message():
+    """(session id, message, message time) from the hook's inbox, else from the Copilot session log."""
+    sid = os.environ.get('COPILOT_AGENT_SESSION_ID') or ''
+    inbox = os.path.join(home(), 'inbox')
+    cand = []
+    if sid and os.path.exists(os.path.join(inbox, sid + '.json')):
+        cand = [os.path.join(inbox, sid + '.json')]
+    elif os.path.isdir(inbox):
+        here = os.path.realpath(ROOT)
+        for f in os.listdir(inbox):
+            if not f.endswith('.json'): continue
+            p = os.path.join(inbox, f)
+            try: e = json.load(open(p))
+            except ValueError: continue
+            c = os.path.realpath(e.get('cwd') or '')
+            if (here == c or here.startswith(c + os.sep) or c.startswith(here + os.sep)) and time.time() - e['ts'] < 600:
+                cand.append(p)
+    if cand:
+        e = json.load(open(max(cand, key=os.path.getmtime)))
+        return e['sessionId'], e['prompt'], e['ts']
+    if sid:
+        ev = os.path.expanduser(f'~/.copilot/session-state/{sid}/events.jsonl')
+        if os.path.exists(ev):
+            last = None
+            for l in open(ev):
+                try: e = json.loads(l)
+                except ValueError: continue
+                if e.get('type') == 'user.message': last = e
+            if last:
+                return sid, last['data'].get('content', ''), last.get('id') or last.get('timestamp')
+    return sid or None, None, None
+
+def pid_alive(pid):
+    if not pid: return False
+    if os.name == 'nt':
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+        if not h: return False
+        code = ctypes.c_ulong(); ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code)); ctypes.windll.kernel32.CloseHandle(h)
+        return code.value == 259
+    try: os.kill(int(pid), 0); return True
+    except OSError: return False
+
+def run_status(run):
+    try: st = json.load(open(os.path.join(run, 'status.json')))
+    except (OSError, ValueError): st = {'state': 'starting'}
+    if st['state'] in ('running', 'starting') and not pid_alive(st.get('pid')) and time.time() - st.get('updated', 0) > 5:
+        st['state'] = 'interrupted'
+    return st
+
+def link(path):
+    return f'[{os.path.basename(path)}](file://{path if path.startswith("/") else "/" + path.replace(os.sep, "/")})'
+
+def describe(run, st):
+    cr = f"{st.get('credits', 0):.0f} credits, {st.get('minutes', 0):.0f} min so far"
+    if st['state'] in ('running', 'starting'):
+        step = st.get('step', 'starting')
+        return f'Working: {step} ({cr}). The next stop opens in an editor tab when it is ready; reply here then.'
+    if st['state'] == 'paused':
+        return (f"Waiting for your reply at {st['where']} ({cr}). The stop is open in an editor tab "
+                f"({link(st['stop_file'])}); reply here with go, your answers, a question, or stop.")
+    if st['state'] == 'interrupted':
+        return f"The run was interrupted during {st.get('step', 'a step')} ({cr}). Reply `resume` to continue it."
+    res = st.get('result', '').splitlines()[0] if st.get('result') else 'ended'
+    tail = ' Reply `resume` to continue from there.' if st.get('resumable') else ' Start a new chat for the next story; `report` writes a problem report.'
+    return f"Finished: {res}. Final report: {link(st.get('final') or os.path.join(run, 'final.md'))}.{tail}"
+
+def launch(args, run):
+    log = open(os.path.join(run, 'ctl.log'), 'a')
+    kw = dict(cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+    if os.name == 'nt':
+        kw['creationflags'] = 0x00000008 | 0x00000200      # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    else:
+        kw['start_new_session'] = True
+    p = subprocess.Popen([sys.executable, os.path.abspath(__file__), *args], **kw)
+    json.dump({'state': 'starting', 'pid': p.pid, 'updated': time.time(), 'step': 'starting'}, open(os.path.join(run, 'status.json'), 'w'))
+    return p
+
+def passthrough():
+    out = []
+    if a.fake: out += ['--fake', a.fake]
+    if a.no_open: out.append('--no-open')
+    if a.log: out += ['--log', a.log]
+    if a.no_log: out.append('--no-log')
+    return out
+
+def chat():
+    sid, msg, ts = read_message()
+    if msg is None:
+        print('I could not read your message (the story agent\'s hook did not run, so hooks may be turned off here). '
+              'Run the story from the terminal instead: python3 <path>/story-ctl.py story.txt'); return
+    rc, _ = git('rev-parse', '--is-inside-work-tree')
+    if rc:
+        print('Open the repository you want to change as the workspace folder, then paste the story again.'); return
+    cd = os.path.join(home(), 'chats'); os.makedirs(cd, exist_ok=True)
+    cf = os.path.join(cd, re.sub(r'[^\w.-]', '_', sid or 'unknown') + '.json')
+    ch = json.load(open(cf)) if os.path.exists(cf) else {}
+    if ch.get('last_ts') == ts and ch.get('last_out'):
+        print(ch['last_out']); return                       # the same message again: same answer, nothing re-run
+    out = chat_reply(ch, msg.strip())
+    ch.update(last_ts=ts, last_out=out)
+    json.dump(ch, open(cf, 'w'))
+    print(out)
+
+def chat_reply(ch, msg):
+    global S
+    word = msg.lower().rstrip('.!')
+    if word == 'help': return CHAT_HELP
+    if word == 'stats':
+        import io, contextlib
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf): stats()
+        except SystemExit as e: return str(e)
+        return '```\n' + buf.getvalue() + '```'
+    run = ch.get('run')
+    if word == 'report':
+        import io, contextlib
+        r = run or resolve_run('last')
+        with contextlib.redirect_stdout(io.StringIO()): report(r)
+        return f"Problem report: {link(os.path.join(r, 'problem-report.md'))}. It contains your story and replies: replace names before sharing it."
+    if not run:
+        if word in ('resume', 'continue'):
+            try: run = resolve_run('last')
+            except SystemExit as e: return str(e)
+            ch['run'] = run; msg = word = 'resume'
+        elif parse_criteria(msg):
+            S = run = os.path.join(runs_dir(), new_run_id())
+            os.makedirs(run, exist_ok=True)
+            sf = os.path.join(run, 'story.txt'); open(sf, 'w').write(msg + '\n')
+            launch([sf, '--state', run, '--step', '--base', a.base, *passthrough()], run)
+            ch['run'] = run
+            return ('Started. Investigate is reading the code; the plan opens in an editor tab when it is ready '
+                    '(usually a few minutes). Reply here then. Send `status` any time.')
+        else:
+            return CHAT_HELP
+    st = run_status(run)
+    if word == 'status': return describe(run, st)
+    if st['state'] in ('running', 'starting'):
+        if word == 'stop':
+            try:
+                if os.name == 'nt': os.kill(int(st['pid']), signal.CTRL_BREAK_EVENT)
+                else: os.kill(int(st['pid']), signal.SIGINT)
+            except OSError: pass
+            return 'Stopping. Everything so far is saved; reply `resume` later to continue.'
+        return describe(run, st) + ' Your message was not used: send it again when the stop opens.'
+    if st['state'] == 'paused':
+        rf = os.path.join(run, f'chat-reply-{int(time.time() * 1000)}.txt'); open(rf, 'w').write(msg)
+        launch(['--resume', run, '--step', '--reply-file', rf, *passthrough()], run)
+        return 'Got it. Continuing; the next stop opens in an editor tab. Send `status` any time.'
+    if st['state'] == 'interrupted' or (st['state'] == 'ended' and st.get('resumable')):
+        if word not in ('resume', 'continue', 'go', 'retry'):
+            return describe(run, st)
+        launch(['--resume', run, '--step', *passthrough()], run)
+        return 'Resuming from the last finished step; the next stop opens in an editor tab. Send `status` any time.'
+    return describe(run, st)
+
 # ---------- the workflow ----------
 
 def main(argv=None):
-    global a, ROOT, S, trace, answers, step, fake_count, cur, usage, t0, prev_seconds, replay, replay_i, pending, meta
+    global a, ROOT, S, trace, answers, step, fake_count, cur, usage, t0, prev_seconds, replay, replay_i, pending, meta, reply_text
     ap = argparse.ArgumentParser()
     ap.add_argument('story', nargs='?'); ap.add_argument('--base', default='HEAD'); ap.add_argument('--reply-cmd')
     ap.add_argument('--cap', type=int, default=300); ap.add_argument('--state')
@@ -505,14 +737,23 @@ def main(argv=None):
     ap.add_argument('--stats', action='store_true', help='summarise the run log')
     ap.add_argument('--log', help='run log file (default ~/.story-ctl/runs.jsonl, or $STORY_CTL_LOG)')
     ap.add_argument('--no-log', action='store_true', help='do not add this run to the run log')
+    ap.add_argument('--step', action='store_true', help='chat mode: pause at each stop (exit 10) instead of waiting for input')
+    ap.add_argument('--reply-file', help='chat mode, with --resume: the reply to the stop the run is paused at')
+    ap.add_argument('--chat', action='store_true', help='the story agent\'s command: start or continue the story for this chat')
+    ap.add_argument('--hook-prompt', action='store_true', help='the story agent\'s userPromptSubmitted hook')
+    ap.add_argument('--hook-guard', action='store_true', help='the story agent\'s preToolUse hook')
     ap.add_argument('--fake', help='test mode: play back <agent>-<k>.md files from this folder instead of calling copilot')
     a = ap.parse_args(argv)
     ROOT = os.getcwd()
-    if a.stats: return stats()
-    if a.report: return report(resolve_run(a.report))
+    reply_text = open(a.reply_file).read().strip() if a.reply_file else None
+    if a.hook_prompt: return hook_prompt()
+    if a.hook_guard: return hook_guard()
     fake_count, trace, answers, step, usage = {}, [], [], 0, {}
     cur = {'impl': None, 'rev': None, 'verdicts': [], 'handoff': None}
-    t0, prev_seconds, replay, replay_i, pending = time.monotonic(), 0.0, [], 0, None
+    t0, prev_seconds, replay, replay_i, pending, meta = time.monotonic(), 0.0, [], 0, None, {}
+    if a.chat: return chat()
+    if a.stats: return stats()
+    if a.report: return report(resolve_run(a.report))
     if a.resume:
         S = resolve_run(a.resume)
         meta = json.load(open(os.path.join(S, 'meta.json')))
@@ -535,7 +776,7 @@ def main(argv=None):
             sys.exit(f'--base {a.base} is not a commit in this repository (run story-ctl from the repository root).')
         base_sha = out.decode().strip()
         base_desc = base_sha if a.base == base_sha else f'{base_sha} ({a.base} when the run started)'
-        S = a.state or os.path.join(runs_dir(), time.strftime('%Y%m%d-%H%M%S'))
+        S = a.state or os.path.join(runs_dir(), new_run_id())
         os.makedirs(S, exist_ok=True)
         meta = {'version': VERSION, 'started': time.strftime('%Y-%m-%d %H:%M'), 'story_text': story,
                 'story_name': os.path.basename(a.story), 'base_desc': base_desc, 'agents': [INV, IMP, REV],
@@ -546,7 +787,7 @@ def main(argv=None):
         sys.exit('No acceptance criteria (lines starting "AC1:") found in the story file.')
     def _interrupt(signum, frame):
         raise KeyboardInterrupt
-    for sig in (signal.SIGTERM, getattr(signal, 'SIGHUP', None)):   # a closed terminal or a kill is handled like Ctrl-C
+    for sig in (signal.SIGTERM, getattr(signal, 'SIGHUP', None), getattr(signal, 'SIGBREAK', None)):   # a closed terminal or a kill is handled like Ctrl-C
         if sig is not None: signal.signal(sig, _interrupt)
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
@@ -554,6 +795,9 @@ def main(argv=None):
     except KeyboardInterrupt:
         jwrite({'type': 'session', 'seconds': round(time.monotonic() - t0)})
         write_log('Interrupted')
+        try: last = json.load(open(os.path.join(S, 'status.json'))).get('step')
+        except (OSError, ValueError): last = None
+        set_status('interrupted', step=last or 'a step')
         print(f'\n[story-ctl] interrupted; everything so far is saved. To continue: --resume {S}', file=sys.stderr)
         sys.exit(130)
 

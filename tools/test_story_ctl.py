@@ -4,7 +4,7 @@
 Each workflow test makes a throwaway git repository, plays back canned agent reports (--fake) and answers the
 stops from a queue (--reply-cmd), then checks the exact agent call sequence, the prompts and the final result.
 """
-import importlib.util, json, os, shutil, subprocess, sys, tempfile, textwrap, unittest, warnings
+import importlib.util, json, os, shutil, subprocess, sys, tempfile, textwrap, time, unittest, warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CTL = os.path.join(HERE, 'story-ctl.py')
@@ -415,6 +415,195 @@ class Flow(unittest.TestCase):
         seq = self.run_ctl(['go'], extra=('--resume', 'last'), state=False)
         self.assertIn('resumed: investigate (saved result)', self.out)
         self.assertIn('Approved', self.out)
+
+
+class Chat(unittest.TestCase):
+    """The story agent's flow: hook keeps the message, --chat starts or continues the run in the background."""
+    def setUp(self):
+        warnings.simplefilter('ignore', ResourceWarning)
+        self.t = tempfile.mkdtemp(); self.repo = os.path.join(self.t, 'repo'); os.mkdir(self.repo)
+        self.fake = os.path.join(self.t, 'fake'); os.mkdir(self.fake)
+        g = lambda *a: subprocess.run(['git', *a], cwd=self.repo, check=True, capture_output=True)
+        g('init', '-q'); g('config', 'user.email', 't@example.com'); g('config', 'user.name', 't')
+        open(os.path.join(self.repo, 'Foo.java'), 'w').write('class Foo {}\n'); g('add', '.'); g('commit', '-qm', 'init')
+        self.home = os.path.join(self.t, 'sc-home'); self.uhome = os.path.join(self.t, 'home'); os.mkdir(self.uhome)
+        self.env = dict(os.environ, STORY_CTL_HOME=self.home, STORY_CTL_LOG=os.path.join(self.t, 'runs.jsonl'),
+                        HOME=self.uhome, COPILOT_AGENT_SESSION_ID='sid-1')
+        self.env.pop('STORY_CTL_EDITOR', None)
+
+    def tearDown(self):
+        shutil.rmtree(self.t, ignore_errors=True)
+
+    def agents(self, **files):
+        for k, v in files.items():
+            parts = k.split('_'); ext = '.' + parts[2] if len(parts) > 2 else '.md'
+            open(os.path.join(self.fake, f'{parts[0]}-{parts[1]}{ext}'), 'w').write(v)
+
+    def hook(self, msg, sid='sid-1', cwd=None):
+        p = subprocess.run([sys.executable, CTL, '--hook-prompt'], input=json.dumps({'sessionId': sid, 'prompt': msg, 'cwd': cwd or self.repo,
+                           'timestamp': time.time()}), capture_output=True, text=True, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stderr); return p.stdout
+
+    def chat(self, msg, sid='sid-1', hook=True):
+        if hook: self.hook(msg, sid)
+        time.sleep(0.01)
+        env = dict(self.env, COPILOT_AGENT_SESSION_ID=sid)
+        p = subprocess.run([sys.executable, CTL, '--chat', '--fake', self.fake, '--no-open'], cwd=self.repo,
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout.strip()
+
+    def run_dir(self, sid='sid-1'):
+        return json.load(open(os.path.join(self.home, 'chats', sid + '.json')))['run']
+
+    def wait(self, sid='sid-1', states=('paused', 'ended', 'interrupted')):
+        r = self.run_dir(sid)
+        for _ in range(300):
+            try:
+                st = json.load(open(os.path.join(r, 'status.json')))
+                if st['state'] in states and not sc_alive(st.get('pid')): return st
+            except (OSError, ValueError): pass
+            time.sleep(0.1)
+        self.fail('run did not reach ' + str(states) + ': ' + open(os.path.join(r, 'ctl.log')).read()[-2000:])
+
+    def journal(self, sid='sid-1'):
+        return [json.loads(l) for l in open(os.path.join(self.run_dir(sid), 'journal.jsonl'))]
+
+    def tasks(self, sid='sid-1'):
+        return [e for e in self.journal(sid) if e['type'] == 'task']
+
+    def test_full_story_through_chat_keeps_replies_verbatim(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=RC_Q, implement_2=IMPL, review_2=APPROVE)
+        out = self.chat(STORY)
+        self.assertIn('Started', out)
+        st = self.wait(); self.assertEqual(st['state'], 'paused'); self.assertEqual(st['where'], 'the handoff')
+        self.assertTrue(os.path.exists(st['stop_file']))
+        self.assertIn('Waiting for your reply at the handoff', self.chat('status'))
+        r1 = 'Q1: sort by "name", then $id\n  - and keep `nulls` last'
+        self.assertIn('Got it', self.chat(r1))
+        st = self.wait(); self.assertEqual(st['where'], 'the round 1 review questions')
+        self.chat('Q1: no body')
+        st = self.wait(); self.assertEqual(st['state'], 'ended'); self.assertEqual(st['result'], 'Approved')
+        replies = [e['text'] for e in self.journal() if e['type'] == 'reply']
+        self.assertEqual(replies, [r1, 'Q1: no body'])
+        self.assertEqual([t['label'] for t in self.tasks()], ['investigate', 'implement-r1', 'review-r1', 'implement-r2', 'review-r2'])
+        tr = json.load(open(os.path.join(self.run_dir(), 'trace.json')))
+        impl2 = [x[2] for x in tr if x[0] == 'task' and x[1] == 'implement'][1]
+        self.assertIn(r1, impl2); self.assertIn('Q1: no body', impl2)
+        self.assertIn('Finished: Approved', self.chat('status'))
+        self.assertIn('Start a new chat', self.chat('anything else'))
+
+    def test_question_at_a_stop(self):
+        self.agents(investigate_1=HANDOFF, explain_1='It sorts by id today.', implement_1=IMPL, review_1=APPROVE)
+        self.chat(STORY); self.wait()
+        self.chat('How is it sorted today?')
+        st = self.wait(); self.assertEqual((st['state'], st['where']), ('paused', 'the handoff'))
+        self.assertIn('It sorts by id today.', open(st['stop_file']).read())
+        self.chat('go'); self.assertEqual(self.wait()['result'], 'Approved')
+
+    def test_message_while_running_is_not_used(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, implement_1_sh='sleep 4', review_1=APPROVE)
+        self.chat(STORY); self.wait()
+        self.chat('go'); time.sleep(1.5)
+        out = self.chat('Q1: actually sort by date')
+        self.assertIn('Working: implement-r1', out); self.assertIn('was not used', out)
+        self.assertEqual(self.wait()['result'], 'Approved')
+        self.assertNotIn('sort by date', open(os.path.join(self.run_dir(), 'trace.json')).read())
+
+    def test_stop_while_running_then_resume(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, implement_1_sh='echo half >> Foo.java; sleep 20',
+                    implement_2=IMPL, review_1=APPROVE)
+        self.chat(STORY); self.wait(); self.chat('go'); time.sleep(1.5)
+        self.assertIn('Stopping', self.chat('stop'))
+        st = self.wait(); self.assertEqual(st['state'], 'interrupted')
+        self.assertIn('interrupted during implement-r1', self.chat('status'))
+        self.assertIn('Resuming', self.chat('resume'))
+        st = self.wait(); self.assertEqual((st['state'], st['where']), ('paused', 'the resume of an interrupted step'))
+        self.assertIn('Foo.java', open(st['stop_file']).read())
+        self.chat('retry'); self.assertEqual(self.wait()['result'], 'Approved')
+
+    def test_same_message_twice_runs_once(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.chat(STORY); self.wait()
+        self.hook('go'); a1 = self.chat('go', hook=False); a2 = self.chat('go', hook=False)
+        self.assertEqual(a1, a2)
+        self.assertEqual(self.wait()['result'], 'Approved')
+        self.assertEqual([t['label'] for t in self.tasks()].count('implement-r1'), 1)
+
+    def test_new_chat_is_a_new_story(self):
+        self.agents(investigate_1=HANDOFF, investigate_2=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.chat(STORY); self.wait()
+        self.assertIn('Started', self.chat(STORY, sid='sid-2')); self.wait('sid-2')
+        self.assertNotEqual(self.run_dir('sid-1'), self.run_dir('sid-2'))
+        self.chat('go', sid='sid-1'); self.assertEqual(self.wait()['result'], 'Approved')
+        self.assertEqual(self.wait('sid-2')['state'], 'paused')
+
+    def test_stop_at_a_stop_then_resume_in_a_new_chat(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.chat(STORY); self.wait()
+        self.chat('stop'); st = self.wait(); self.assertTrue(st['resumable'])
+        self.assertIn('Resuming', self.chat('resume', sid='sid-3'))
+        st = self.wait('sid-3'); self.assertEqual(st['where'], 'the handoff')
+        self.chat('go', sid='sid-3'); self.assertEqual(self.wait('sid-3')['result'], 'Approved')
+
+    def test_help_and_no_criteria(self):
+        self.assertIn('Paste a story', self.chat('hello'))
+        self.assertIn('Paste a story', self.chat('help'))
+
+    def test_no_hook_falls_back_to_session_log_or_explains(self):
+        self.agents(investigate_1=HANDOFF)
+        self.assertIn('could not read your message', self.chat('x', sid='sid-9', hook=False))
+        d = os.path.join(self.uhome, '.copilot', 'session-state', 'sid-9'); os.makedirs(d)
+        open(os.path.join(d, 'events.jsonl'), 'w').write(json.dumps({'type': 'user.message', 'id': 'e1', 'data': {'content': STORY}}) + '\n')
+        self.assertIn('Started', self.chat('ignored', sid='sid-9', hook=False))
+
+    def test_outside_a_repository(self):
+        os.makedirs(os.path.join(self.t, 'plain'))
+        self.hook(STORY, cwd=os.path.join(self.t, 'plain'))
+        p = subprocess.run([sys.executable, CTL, '--chat'], cwd=os.path.join(self.t, 'plain'), capture_output=True, text=True, env=self.env)
+        self.assertIn('Open the repository', p.stdout)
+
+    def test_stats_and_report_in_chat(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.chat(STORY); self.wait(); self.chat('go'); self.wait()
+        self.assertIn('1 runs', self.chat('stats'))
+        out = self.chat('report'); self.assertIn('problem-report.md', out)
+        self.assertTrue(os.path.exists(os.path.join(self.run_dir(), 'problem-report.md')))
+
+    def guard(self, tool, args):
+        p = subprocess.run([sys.executable, CTL, '--hook-guard'], input=json.dumps({'sessionId': 's', 'toolName': tool, 'toolArgs': args}),
+                           capture_output=True, text=True, env=self.env)
+        return json.loads(p.stdout).get('permissionDecision', 'allow')
+
+    def test_guard(self):
+        ok = ['python3 ~/.story-ctl/story-ctl.py --chat', 'python3 -I "/Users/x y/.story-ctl/story-ctl.py" --chat',
+              'py "$env:USERPROFILE\\.story-ctl\\story-ctl.py" --chat', 'python3 ~/.story-ctl/story-ctl.py --chat 2>&1',
+              'cd /repo && python3 ~/.story-ctl/story-ctl.py --chat']
+        for c in ok:
+            self.assertEqual(self.guard('bash', {'command': c}), 'allow', c)
+        bad = ['python3 ~/.story-ctl/story-ctl.py --chat; rm -rf src', 'python3 ~/.story-ctl/story-ctl.py --chat && git push',
+               'cat src/Foo.java', 'python3 ~/.story-ctl/story-ctl.py story.txt', 'python3 evil.py --chat',
+               'python3 ~/.story-ctl/story-ctl.py --chat | tee x']
+        for c in bad:
+            self.assertEqual(self.guard('bash', {'command': c}), 'deny', c)
+        self.assertEqual(self.guard('edit', {'path': 'a', 'new_str': 'b'}), 'deny')
+        self.assertEqual(self.guard('skill', {'skill': 'x'}), 'deny')
+        self.assertEqual(self.guard('read_bash', {'shellId': '0'}), 'allow')
+        p = subprocess.run([sys.executable, CTL, '--hook-guard'], input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'ls'}}),
+                           capture_output=True, text=True, env=self.env)
+        self.assertEqual(json.loads(p.stdout)['permissionDecision'], 'deny')
+
+    def test_hook_prompt_verbatim(self):
+        m = 'Line "one" $HOME `x`\n\n  indented\ttab'
+        self.hook(m, sid='a/b')
+        e = json.load(open(os.path.join(self.home, 'inbox', 'a_b.json')))
+        self.assertEqual(e['prompt'], m)
+
+def sc_alive(pid):
+    if not pid: return False
+    try: os.kill(int(pid), 0); return True
+    except OSError: return False
+
 
 @unittest.skipIf(sc is None, 'controller not importable')
 class Helpers(unittest.TestCase):
