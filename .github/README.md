@@ -63,7 +63,7 @@ Use a fresh chat for each step so each agent starts from the report alone. The h
 2. Within seconds it replies "Started". The first time, VS Code asks you to approve the `story-ctl.py --chat` command; allow it for good (for that exact command) so later messages run without a prompt.
 3. A live view, `progress.md`, opens in an editor tab, and the reply links it too. Press Cmd+Shift+V (Ctrl+Shift+V) for the preview; it updates by itself as the run goes. It shows:
    - the criteria;
-   - each step with its time, credits, report and a full list of what it did;
+   - each step with the model and reasoning effort it ran on (both models if it switched to its fallback), its time, credits, report and a full list of what it did;
    - your replies;
    - the files changed in the working tree;
    - what the running agent is doing now: the files it reads, its searches, the commands it runs (with ✓ or ✗) and the files it edits.
@@ -78,7 +78,7 @@ Use a fresh chat for each step so each agent starts from the report alone. The h
    | a review with questions | your answers | the next round fixes the Edit items and applies your answers |
    | implement could not finish a round | `review`, or an instruction for implement | the work goes to review, or implement continues with your instruction |
    | any stop | `stop` | the run ends there and can be resumed later |
-   | any time | `status` | what is running and its last five actions, credits and minutes so far, or where it is waiting |
+   | any time | `status` | what is running, on which model and effort, its last five actions, credits and minutes so far, or where it is waiting |
    | after a stop or an interruption | `resume` | continues from the last finished step (in a new chat too: it picks up the last run in this repository) |
    | any time | `stats`, `report`, `help` | your run statistics, a problem report for this run, the list of replies |
 

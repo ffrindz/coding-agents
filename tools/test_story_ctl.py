@@ -41,6 +41,9 @@ def done(i, code=None, ok=True):
     if code is not None: d['shellExecution'] = {'exitCode': code}
     return {'type': 'tool.execution_complete', 'data': d}
 IMPL_EVENTS = events(
+    {'type': 'session.model_change', 'data': {'source': 'startup', 'newModel': 'claude-sonnet-5.5', 'reasoningEffort': None}},
+    {'type': 'session.model_change', 'data': {'source': 'agent', 'newModel': 'gpt-6.1-sol', 'reasoningEffort': None}},
+    {'type': 'session.usage_record', 'data': {'usage': {'model': 'gpt-6.1-sol', 'modelDisplayName': 'GPT-6.1 Sol', 'reasoningEffort': 'medium'}}},
     {'type': 'assistant.message', 'data': {'content': 'Checking the controller first.', 'toolRequests': [{}]}},
     tool('1', 'view', {'path': '/repo/Foo.java'}), done('1'), tool('2', 'view', {'path': 'Bar.java'}), done('2'),
     tool('3', 'report_intent', {'intent': 'x'}),
@@ -292,6 +295,7 @@ class Flow(unittest.TestCase):
         prog = open(os.path.join(self.state, 'progress.md')).read()
         self.assertIn('# Story: add a thing', prog); self.assertIn('**Finished**', prog)
         self.assertIn('AC2: an unknown id returns 404', prog)
+        self.assertIn('✓ implement round 1 · GPT-6.1 Sol, effort medium ·', prog)
         for x in ('✓ investigate', '↩ your reply at the handoff: “Q1: yes”', '✓ implement round 1', '✓ review round 1', '■ Approved'):
             self.assertIn(x, prog)
         self.assertNotIn('doing now', prog)
@@ -580,7 +584,9 @@ class Chat(unittest.TestCase):
         self.assertIn('Working: implement round 1', out); self.assertIn('was not used', out)
         self.assertIn('./mvnw test -Dtest=FooTest   ✓', out); self.assertIn('progress.md', out)
         prog = open(os.path.join(self.run_dir(), 'progress.md')).read()
-        self.assertIn('▶ implement round 1', prog); self.assertIn('## What implement is doing now', prog)
+        self.assertIn('▶ implement round 1 · GPT-6.1 Sol, effort medium · running', prog)
+        self.assertIn('## What implement is doing now (GPT-6.1 Sol, effort medium)', prog)
+        self.assertIn('Working: implement round 1 on GPT-6.1 Sol, effort medium', out)
         self.assertEqual(self.wait()['result'], 'Approved')
         self.assertNotIn('sort by date', open(os.path.join(self.run_dir(), 'trace.json')).read())
 
@@ -716,12 +722,18 @@ class Helpers(unittest.TestCase):
     def test_activity_reads_a_growing_log(self):
         d = tempfile.mkdtemp(); p = os.path.join(d, 'events.jsonl')
         lines = IMPL_EVENTS.splitlines(True)
-        open(p, 'w').write(''.join(lines[:3]) + lines[3][:10])            # the last line half written
+        open(p, 'w').write(''.join(lines[:6]) + lines[6][:10])            # the last line half written
         act = sc.Activity(p); act.read()
         self.assertEqual(len(act.acts), 2)
         open(p, 'w').write(IMPL_EVENTS); act.read()
         self.assertEqual([x[0] for x in act.acts], ['note', 'read', 'read', 'edit', 'run', 'run'])
         self.assertEqual(act.acts[4][2], '✗ exit 1'); self.assertEqual(act.acts[5][2], '✓')
+        self.assertEqual(sc.model_desc(act), 'GPT-6.1 Sol, effort medium')
+        open(p, 'a').write(events({'type': 'session.usage_record', 'data': {'usage': {'model': 'gpt-6-luna', 'modelDisplayName': 'GPT-6 Luna', 'reasoningEffort': 'high'}}}))
+        act.read(); self.assertEqual(sc.model_desc(act), 'GPT-6.1 Sol → GPT-6 Luna, effort high')
+        open(os.path.join(d, 'e2'), 'w').write(IMPL_EVENTS.splitlines(True)[0])
+        e2 = sc.Activity(os.path.join(d, 'e2')); e2.read(); self.assertEqual(sc.model_desc(e2), 'claude-sonnet-5.5, default effort')
+        self.assertEqual(sc.model_desc(sc.Activity(os.path.join(d, 'none'))), '')
         self.assertEqual(sc.Activity(os.path.join(d, 'none')).read(), [])
         shutil.rmtree(d)
 

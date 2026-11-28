@@ -15,6 +15,12 @@ Every change was tested before and after with headless Copilot CLI runs on publi
 
 ## 2026-11-28
 
+- **Workflow controller v1.7: the progress page shows the model and reasoning effort of each step.** Code only; no agent changes.
+  - **Where:** while a step runs, and for each finished step, the page shows the model and reasoning effort it is running or ran on, for example "implement round 1 · GPT-6.1 Sol, effort medium". `status` in the chat shows the same.
+  - **Fallback:** when a step switches to its fallback model, both are shown, for example "GPT-6.1 Sol → GPT-6 Luna".
+  - **Source:** the model and effort are read from the Copilot session log (`session.usage_record`, or `session.model_change` before the first call), so they show what actually answered, not what the agent file asks for.
+  - **Checks:** across 150 recent real sessions it reported GPT-6.1 Sol 81 times, GPT-6 Luna 68 times and Claude Sonnet 5.5 once, all with effort medium. Offline tests pass (64).
+
 - **Workflow controller v1.6: you are told when a stop or the end is reached.** Code only; no agent changes.
   - **Why:** the chat cannot post a message by itself, so you could not tell when a run had finished unless you watched the progress tab or sent `status`.
   - **Notifications:** at each stop and when the run ends, the controller shows a desktop notification, such as "the plan is ready", "the round 2 review has questions" or "Approved".

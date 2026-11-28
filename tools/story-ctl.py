@@ -49,7 +49,7 @@ Tests: python3 tools/test_story_ctl.py (no Copilot, no credits).
 """
 import argparse, difflib, hashlib, json, os, re, shutil, signal, subprocess, sys, time, uuid
 
-VERSION = '1.6'
+VERSION = '1.7'
 READ_ONLY_DENY = ['write', 'shell(git push)', 'shell(git commit)', 'shell(git reset)', 'shell(git checkout)',
                   'shell(git stash)', 'shell(git clean)', 'shell(git restore)']
 WRITE_DENY = ['shell(git push)']
@@ -381,7 +381,7 @@ def run_agent(agent, prompt, label, read_only):
             k = fake_count[agent] = fake_count.get(agent, 0) + 1
             base = os.path.join(os.path.abspath(a.fake), f'{agent}-{k}')
             if os.path.exists(base + '.events'):
-                LIVE['acts'] = Activity(base + '.events').read(); set_status('running', step=label, agent=agent)
+                LIVE['act'] = Activity(base + '.events'); LIVE['acts'] = LIVE['act'].read(); set_status('running', step=label, agent=agent)
             if os.path.exists(base + '.sh'):
                 subprocess.run(['sh', base + '.sh'], cwd=ROOT)
             if os.path.exists(base + '.exit'):
@@ -396,7 +396,7 @@ def run_agent(agent, prompt, label, read_only):
             for d in deny: cmd += ['--deny-tool', d]
             cmd += ['--max-ai-credits', str(a.cap), '--disable-client-telemetry']
             ev = os.path.expanduser(f'~/.copilot/session-state/{sid}/events.jsonl')
-            act = Activity(ev); LIVE['acts'] = act.acts
+            act = Activity(ev); LIVE['acts'] = act.acts; LIVE['act'] = act
             lf = os.path.join(S, f'{step:02d}-{label}.stdout.txt')
             with open(lf, 'w') as out_f:
                 p = subprocess.Popen(cmd, stdout=out_f, stderr=subprocess.STDOUT, cwd=ROOT)
@@ -432,16 +432,16 @@ def run_agent(agent, prompt, label, read_only):
         after = snapshot()
         touched = before is not None and after != before
         trace.append(['task', agent, prompt, final, tools, code])
-        actf = None
+        actf, mdesc = None, model_desc(LIVE.get('act')) if LIVE else ''
         if LIVE and LIVE['acts']:
             actf = f'{step:02d}-{label}.activity.md'
-            save(actf, f'# What {agent} did ({step_name(label)})\n\n```text\n' + '\n'.join(activity_lines(LIVE['acts'], short=False)) + '\n```\n')
+            save(actf, f'# What {agent} did ({step_name(label)})\n\n' + (f'Model: {mdesc}\n\n' if mdesc else '') + '```text\n' + '\n'.join(activity_lines(LIVE['acts'], short=False)) + '\n```\n')
         LIVE = None
         if final:
             save(f'{step:02d}-{label}.result.md', final)
             jwrite({'type': 'task', 'agent': agent, 'label': label, 'phash': phash(prompt), 'result': final, 'code': code,
                     'credits': spent, 'attempts': attempt, 'seconds': round(time.monotonic() - t_start),
-                    'file': f'{step:02d}-{label}.result.md', 'activity': actf})
+                    'file': f'{step:02d}-{label}.result.md', 'activity': actf, 'model': mdesc})
         if read_only and touched:
             stop_with(f'Stopped — the {agent} step changed the working tree, but it must not edit. Nothing was '
                       f'reverted; check these files:\n{changed_files()}')
@@ -552,7 +552,7 @@ def set_status(state, **kw):
     st = {'state': state, 'pid': os.getpid(), 'updated': time.time(), 'credits': round(total_credits(), 1),
           'minutes': round(elapsed() / 60, 1), **kw}
     if LIVE and state == 'running':
-        st['recent'] = activity_lines(LIVE['acts'])[-5:]; st['actions'] = len(LIVE['acts'])
+        st['recent'] = activity_lines(LIVE['acts'])[-5:]; st['actions'] = len(LIVE['acts']); st['model'] = model_desc(LIVE.get('act'))
     tmp = os.path.join(S, 'status.json.tmp')
     json.dump(st, open(tmp, 'w')); os.replace(tmp, os.path.join(S, 'status.json'))
     try: write_progress(st)
@@ -636,6 +636,7 @@ class Activity:
     """Reads a Copilot session log as it grows (a line still being written is kept for the next read)."""
     def __init__(self, path):
         self.path, self.pos, self.buf, self.acts, self.idx = path, 0, '', [], {}
+        self.model, self.effort, self.used = None, None, []        # used: model names in the order they answered
     def read(self):
         try:
             with open(self.path, encoding='utf-8', errors='replace') as f:
@@ -647,6 +648,14 @@ class Activity:
             try: e = json.loads(l)
             except ValueError: continue
             t, d = e.get('type'), e.get('data') or {}
+            if t == 'session.model_change' and d.get('newModel'):
+                self.model, self.effort = d['newModel'], d.get('reasoningEffort') or self.effort
+            elif t == 'session.usage_record':
+                u = d.get('usage') or {}
+                name = u.get('modelDisplayName') or u.get('model')
+                if name and u.get('model') != 'none':
+                    self.model, self.effort = name, u.get('reasoningEffort') or self.effort
+                    if name not in self.used: self.used.append(name)
             if t == 'assistant.message' and d.get('toolRequests') and (d.get('content') or '').strip():
                 self.acts.append(['note', _short(d['content'], 150), ''])
             elif t == 'tool.execution_start' and d.get('toolName') not in ACT_SKIP:
@@ -658,6 +667,12 @@ class Activity:
                 if x[0] == 'run' and code is not None: x[2] = '✓' if code == 0 else f'✗ exit {code}'
                 elif d.get('success') is False: x[2] = '✗ failed'
         return self.acts
+
+def model_desc(act):
+    """"GPT-6.1 Sol, effort medium", or "GPT-6.1 Sol → GPT-6 Luna, effort medium" after a fallback."""
+    if not act or not (act.used or act.model): return ''
+    name = ' → '.join(act.used) if act.used else act.model
+    return name + (f', effort {act.effort}' if act.effort else ', default effort')
 
 def activity_lines(acts, short=True):
     """One line per action; consecutive reads, searches and finds are put on one line. short: file names only
@@ -705,19 +720,20 @@ def write_progress(st):
         elif e['type'] == 'task':
             open_start = None
             f = e.get('file')
-            L.append(f"- ✓ {step_name(e['label'])} · {_mins(e.get('seconds', 0))} · {_cr(e.get('credits', 0))}"
+            L.append(f"- ✓ {step_name(e['label'])}" + (f" · {e['model']}" if e.get('model') else '') + f" · {_mins(e.get('seconds', 0))} · {_cr(e.get('credits', 0))}"
                      + (f' · [report]({f})' if f else '') + (f" · [activity]({e['activity']})" if e.get('activity') else ''))
         elif e['type'] == 'reply':
             L.append(f"- ↩ your reply at {e['where']}: “{_short(e['text'] or '(empty)', 120)}”")
         elif e['type'] == 'end':
             L.append(f"- ■ {_short(e['result'], 200)} · [final report](final.md)")
     if LIVE:
-        L.append(f"- ▶ {step_name(LIVE['label'])} · running {_mins(time.time() - LIVE['since'])}")
+        md = model_desc(LIVE.get('act'))
+        L.append(f"- ▶ {step_name(LIVE['label'])}" + (f' · {md}' if md else '') + f" · running {_mins(time.time() - LIVE['since'])}")
     elif state == 'paused':
         L.append(f"- ⏸ waiting for your reply at {st.get('where')} · [open the stop]({os.path.basename(st.get('stop_file', ''))})")
     if LIVE:
         lines = activity_lines(LIVE['acts'])
-        L += ['', f"## What {LIVE['agent']} is doing now", '',
+        L += ['', f"## What {LIVE['agent']} is doing now" + (f' ({md})' if md else ''), '',
               f'{len(LIVE["acts"])} actions so far' + (f'; the last 25 below' if len(lines) > 25 else '') + '.', '', '```text']
         L += lines[-25:] or ['(starting)']
         L += ['```']
@@ -946,7 +962,8 @@ def describe(run, st):
         step = step_name(st.get('step', 'starting'))
         recent = st.get('recent') or []
         now = ('\n\nLatest actions:\n```text\n' + '\n'.join(recent) + '\n```\n') if recent else ' '
-        return (f'Working: {step} ({cr}; {st.get("actions", 0)} actions in this step).{now}Live view: {link(os.path.join(run, "progress.md"))}. '
+        on = f' on {st["model"]}' if st.get('model') else ''
+        return (f'Working: {step}{on} ({cr}; {st.get("actions", 0)} actions in this step).{now}Live view: {link(os.path.join(run, "progress.md"))}. '
                 'The next stop opens in an editor tab when it is ready; reply here then.')
     if st['state'] == 'paused':
         return (f"Waiting for your reply at {st['where']} ({cr}). The stop is open in an editor tab "
