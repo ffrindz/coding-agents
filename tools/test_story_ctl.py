@@ -92,7 +92,7 @@ class Flow(unittest.TestCase):
         open(os.path.join(self.t, 'story.txt'), 'w').write(STORY)
         open(os.path.join(self.t, 'reply.py'), 'w').write(REPLY)
         self.log = os.path.join(self.t, 'runs.jsonl')
-        self.env = dict(os.environ, STORY_CTL_LOG=self.log)
+        self.env = dict(os.environ, STORY_CTL_LOG=self.log, STORY_CTL_NOTIFY='0')
 
     def tearDown(self):
         shutil.rmtree(self.t)
@@ -301,6 +301,23 @@ class Flow(unittest.TestCase):
         self.assertIn('./mvnw test -Dtest=FooTest   ✗ exit 1', act); self.assertIn('note    Checking the controller first.', act)
         self.assertNotIn('report_intent', act)
 
+    def test_notifications_and_final_report_opened(self):
+        rec = os.path.join(self.t, 'rec.py'); calls = os.path.join(self.t, 'calls.txt')
+        open(rec, 'w').write(f'import sys\nopen({calls!r}, "a").write(" | ".join(sys.argv[1:]) + "\\n")\n')
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.env.update(STORY_CTL_NOTIFY='1', STORY_CTL_NOTIFY_CMD=f'{sys.executable} {rec}', STORY_CTL_EDITOR=f'{sys.executable} {rec}')
+        open(os.path.join(self.t, 'story.txt'), 'w').write(STORY)
+        args = [sys.executable, CTL, os.path.join(self.t, 'story.txt'), '--fake', self.fake, '--state', self.state]
+        p = subprocess.run(args, cwd=self.repo, input='go\n\n', capture_output=True, text=True, env=self.env)
+        got = open(calls).read()
+        self.assertIn('Story: Story: add a thing | The plan is ready', got)
+        self.assertIn('Story: Story: add a thing | Approved', got)
+        self.assertIn(os.path.join(self.state, 'final.md'), got)
+        self.env['STORY_CTL_NOTIFY'] = '0'; os.remove(calls); shutil.rmtree(self.state)
+        subprocess.run(args, cwd=self.repo, input='stop\n\n', capture_output=True, text=True, env=self.env)
+        self.assertNotIn('Story:', open(calls).read())          # turned off; you stopped it, so final.md is not opened
+        self.assertNotIn('final.md', open(calls).read())
+
     def test_multiline_criteria_in_review_task(self):
         open(os.path.join(self.t, 'story.txt'), 'w').write(
             'Story\n\nAC1: return HTTP 409 on a duplicate\n   Include errorType DUPLICATE_TRANSACTION\nAC2: list them\n  - sorted by date\n\nNotes: not a criterion\n')
@@ -477,7 +494,7 @@ class Chat(unittest.TestCase):
         g('init', '-q'); g('config', 'user.email', 't@example.com'); g('config', 'user.name', 't')
         open(os.path.join(self.repo, 'Foo.java'), 'w').write('class Foo {}\n'); g('add', '.'); g('commit', '-qm', 'init')
         self.home = os.path.join(self.t, 'sc-home'); self.uhome = os.path.join(self.t, 'home'); os.mkdir(self.uhome)
-        self.env = dict(os.environ, STORY_CTL_HOME=self.home, STORY_CTL_LOG=os.path.join(self.t, 'runs.jsonl'),
+        self.env = dict(os.environ, STORY_CTL_NOTIFY='0', STORY_CTL_HOME=self.home, STORY_CTL_LOG=os.path.join(self.t, 'runs.jsonl'),
                         HOME=self.uhome, COPILOT_AGENT_SESSION_ID='sid-1')
         self.env.pop('STORY_CTL_EDITOR', None)
 

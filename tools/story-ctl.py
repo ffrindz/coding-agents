@@ -31,6 +31,8 @@ Live view: progress.md in the run folder opens in an editor tab at the start and
 criteria, each step with its time, credits and report, your replies, and what the running agent is reading,
 searching, running (with pass or fail) and editing, from its Copilot session log; `status` in the chat shows the
 last few actions. Each finished step's actions are kept in <step>.activity.md.
+Notifications: at each stop and when the run ends, a desktop notification (macOS osascript, Windows PowerShell
+toast, Linux notify-send; STORY_CTL_NOTIFY=0 turns them off), and the final report opens in an editor tab.
 Run log: each run adds one line to ~/.story-ctl/runs.jsonl (on your machine only; --log FILE, $STORY_CTL_LOG,
 or --no-log); --stats summarises it (outcomes, rounds, credits per agent, minutes). Credits and time so far are
 shown at every stop and in the final report.
@@ -47,7 +49,7 @@ Tests: python3 tools/test_story_ctl.py (no Copilot, no credits).
 """
 import argparse, difflib, hashlib, json, os, re, shutil, signal, subprocess, sys, time, uuid
 
-VERSION = '1.5'
+VERSION = '1.6'
 READ_ONLY_DENY = ['write', 'shell(git push)', 'shell(git commit)', 'shell(git reset)', 'shell(git checkout)',
                   'shell(git stash)', 'shell(git clean)', 'shell(git restore)']
 WRITE_DENY = ['shell(git push)']
@@ -472,7 +474,7 @@ def ask(text, n, where, asked='', record=True):
         r, reply_text = reply_text, None
         print(f'[story-ctl] your reply at {where} (from the chat)')
     elif a.step:                                # chat mode: pause; the next chat message resumes the run
-        open_in_editor(stop_file)
+        open_in_editor(stop_file); notify(stop_note(where))
         jwrite({'type': 'session', 'seconds': round(time.monotonic() - t0)})
         set_status('paused', where=where, stop_file=stop_file)
         print(f'[story-ctl] paused at {where}: {stop_file}')
@@ -486,7 +488,7 @@ def ask(text, n, where, asked='', record=True):
             if p.returncode: failed = f'the reply command exited with code {p.returncode}'
             print(f'[reply] {r}')
         else:
-            open_in_editor(stop_file)
+            open_in_editor(stop_file); notify(stop_note(where).replace('in the chat', 'in the terminal'))
             print('Your reply (empty line to finish; "stop" to end the run):')
             lines = []
             for l in sys.stdin:
@@ -502,11 +504,48 @@ def ask(text, n, where, asked='', record=True):
                   + ('reply resume in the chat' if a.step else f'--resume {S}'), resumable=True, by_reply=True)
     return r
 
+WIN_TOAST = (r"$ErrorActionPreference='Stop';"
+             r"[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]|Out-Null;"
+             r"$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
+             r"$t=$x.GetElementsByTagName('text');$t.Item(0).AppendChild($x.CreateTextNode($env:STORY_CTL_N_TITLE))|Out-Null;"
+             r"$t.Item(1).AppendChild($x.CreateTextNode($env:STORY_CTL_N_TEXT))|Out-Null;"
+             r"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))")
+
+def story_title():
+    try: story = json.load(open(os.path.join(S, 'meta.json'))).get('story_text', '')
+    except (OSError, ValueError): story = ''
+    return _short(next((l.strip('#* ').strip() for l in story.splitlines() if l.strip()), 'story'), 60)
+
+def notify(text):
+    """A desktop notification (macOS: osascript; Windows: a PowerShell toast; Linux: notify-send). Never fails the
+    run. STORY_CTL_NOTIFY=0 turns it off; STORY_CTL_NOTIFY_CMD runs a command of your own with the title and text."""
+    if os.environ.get('STORY_CTL_NOTIFY', '1').strip().lower() in ('0', 'off', 'no', 'false'): return
+    title = 'Story: ' + story_title()
+    env = dict(os.environ, STORY_CTL_N_TITLE=title, STORY_CTL_N_TEXT=text)
+    own = os.environ.get('STORY_CTL_NOTIFY_CMD')
+    if own: cmd = [*own.split(), title, text]
+    elif sys.platform == 'darwin':
+        cmd = ['osascript', '-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)',
+               '-e', 'end run', title, text]
+    elif os.name == 'nt': cmd = ['powershell', '-NoProfile', '-NonInteractive', '-Command', WIN_TOAST]
+    elif shutil.which('notify-send'): cmd = ['notify-send', title, text]
+    else: return
+    try: subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    except (OSError, subprocess.SubprocessError): pass
+
+def stop_note(where):
+    if where == 'the handoff': return 'The plan is ready (in an editor tab). Reply in the chat: go, your answers, or stop.'
+    m = re.match(r'the round (\d) review questions', where)
+    if m: return f'The round {m.group(1)} review has questions (in an editor tab). Reply in the chat.'
+    if 'implement' in where: return 'Implement could not finish a round (in an editor tab). Reply in the chat: review, an instruction, or stop.'
+    return f'Waiting for your reply at {where} (in an editor tab). Reply in the chat.'
+
 def open_in_editor(path):
     if a.no_open: return
-    ed = os.environ.get('STORY_CTL_EDITOR') or shutil.which('code')
+    ed = os.environ.get('STORY_CTL_EDITOR')
+    ed = (ed.split() if ' ' in ed and not os.path.exists(ed) else [ed]) if ed else ([shutil.which('code')] if shutil.which('code') else None)
     if ed:
-        try: subprocess.run([ed, '-r', path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        try: subprocess.run([*ed, '-r', path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
         except (OSError, subprocess.SubprocessError): pass
 
 def set_status(state, **kw):
@@ -552,6 +591,9 @@ def stop_with(result, resumable=False, by_reply=False):
     jwrite({'type': 'session', 'seconds': round(time.monotonic() - t0)})
     write_log(result)
     set_status('ended', result=result, resumable=resumable, final=os.path.join(S, 'final.md'))
+    if not by_reply:                            # you stopped it yourself: no need to tell you
+        open_in_editor(os.path.join(S, 'final.md'))
+        notify(_short(result.splitlines()[0], 120).rstrip('.') + '. The final report is open in an editor tab.')
     print('\n' + final + f'\n\n[story-ctl] everything is saved in {S}; a problem report for this run: --report {S}')
     sys.exit(0)
 

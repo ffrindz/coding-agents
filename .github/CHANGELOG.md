@@ -15,6 +15,16 @@ Every change was tested before and after with headless Copilot CLI runs on publi
 
 ## 2026-11-28
 
+- **Workflow controller v1.6: you are told when a stop or the end is reached.** Code only; no agent changes.
+  - **Why:** the chat cannot post a message by itself, so you could not tell when a run had finished unless you watched the progress tab or sent `status`.
+  - **Notifications:** at each stop and when the run ends, the controller shows a desktop notification, such as "the plan is ready", "the round 2 review has questions" or "Approved".
+    - macOS: `osascript`, tested.
+    - Windows: a PowerShell toast notification with nothing to install. Untested.
+    - Linux: `notify-send`. Untested.
+  - **Final report:** when the run ends, it opens in an editor tab, unless you stopped the run yourself.
+  - **Settings:** a failed notification never affects the run. `STORY_CTL_NOTIFY=0` turns notifications off, and `STORY_CTL_NOTIFY_CMD` runs your own command instead. `STORY_CTL_EDITOR` may now include arguments.
+  - **Tests:** 1 new offline test (64 in all). macOS: `osascript` exited 0 with quotes, `$` and backticks in the title.
+
 - **Workflow controller v1.5: a live view of what the agents are doing.** Code only; no agent changes.
   - **Why:** the story agent felt like a black box. While implement worked, which can take 10–20 minutes, `status` only said which step was running.
   - **How:** each agent now runs with a session id chosen by the controller, so the controller can read that session's Copilot log while the agent works. It keeps `progress.md` in the run folder up to date, which opens in an editor tab at the start, and VS Code reloads it by itself.
