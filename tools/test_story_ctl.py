@@ -16,6 +16,18 @@ except SystemExit:      # a controller that runs on import (before v1.1)
     sc = None
 
 STORY = 'Story: add a thing\n\nAC1: the list shows the thing\nAC2: an unknown id returns 404\n'
+JIRA = textwrap.dedent('''\
+    PAY-123 Show recent transfers
+
+    As a customer I want to see my recent transfers.
+
+    h3. Acceptance Criteria
+    * The list shows the last 10 transfers
+    ** newest first
+    * An unknown account id returns 404
+
+    h3. Notes
+    Design is in Figma.''')
 HANDOFF = textwrap.dedent('''\
     # Handoff (investigate)
     - **Summary:** story — add a thing
@@ -251,6 +263,15 @@ class Flow(unittest.TestCase):
         self.assertEqual(self.run_ctl(['go']), ['investigate', 'implement', 'implement', 'review'])
 
     # --- fix 6: multi-line criteria reach review ---
+    def test_jira_story_file(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        open(os.path.join(self.t, 'story.txt'), 'w').write(JIRA)
+        self.assertEqual(self.run_ctl(['go']), ['investigate', 'implement', 'review'])
+        self.assertIn('Result:** Approved', self.final)
+        self.assertIn('acceptance criteria numbered from the story', self.out)
+        self.assertIn('AC2: An unknown account id returns 404', self.prompts('investigate')[0])
+        self.assertIn('AC1: The list shows the last 10 transfers\n  - newest first\nAC2:', self.prompts('review')[0])
+
     def test_multiline_criteria_in_review_task(self):
         open(os.path.join(self.t, 'story.txt'), 'w').write(
             'Story\n\nAC1: return HTTP 409 on a duplicate\n   Include errorType DUPLICATE_TRANSACTION\nAC2: list them\n  - sorted by date\n\nNotes: not a criterion\n')
@@ -472,6 +493,10 @@ class Chat(unittest.TestCase):
     def tasks(self, sid='sid-1'):
         return [e for e in self.journal(sid) if e['type'] == 'task']
 
+    def prompt(self, label, sid='sid-1'):
+        d = self.run_dir(sid)
+        return open(os.path.join(d, next(f for f in sorted(os.listdir(d)) if f.endswith(f'-{label}.prompt.md')))).read()
+
     def test_full_story_through_chat_keeps_replies_verbatim(self):
         self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=RC_Q, implement_2=IMPL, review_2=APPROVE)
         out = self.chat(STORY)
@@ -547,8 +572,40 @@ class Chat(unittest.TestCase):
         self.chat('go', sid='sid-3'); self.assertEqual(self.wait('sid-3')['result'], 'Approved')
 
     def test_help_and_no_criteria(self):
-        self.assertIn('Paste a story', self.chat('hello'))
+        self.assertIn('could not find acceptance criteria', self.chat('hello'))
         self.assertIn('Paste a story', self.chat('help'))
+        self.assertFalse(os.path.exists(os.path.join(self.home, 'chats', 'sid-1.json')) and json.load(open(os.path.join(self.home, 'chats', 'sid-1.json'))).get('run'))
+
+    def test_jira_paste_is_numbered_and_started(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        out = self.chat(JIRA)
+        self.assertIn('Started with these acceptance criteria', out)
+        self.assertIn('AC1: The list shows the last 10 transfers', out); self.assertIn('AC2: An unknown account id returns 404', out)
+        st = self.wait()
+        self.assertEqual(st['state'], 'paused')
+        story = open(os.path.join(self.run_dir(), 'story.txt')).read()
+        self.assertIn('PAY-123 Show recent transfers', story); self.assertIn('Design is in Figma.', story)
+        self.assertEqual(open(os.path.join(self.run_dir(), 'story-pasted.txt')).read(), JIRA + '\n')
+        self.assertIn('AC2: An unknown account id returns 404', self.prompt('investigate'))
+        self.chat('go'); self.wait(states=('ended',))
+        rev = self.prompt('review-r1')
+        self.assertIn('AC1: The list shows the last 10 transfers\n  - newest first\nAC2: An unknown account id returns 404', rev)
+
+    def test_plain_lines_are_confirmed_first(self):
+        self.agents(investigate_1=HANDOFF)
+        out = self.chat('The list shows 10 transfers\nAn unknown id returns 404')
+        self.assertIn('Reply `go` to start', out); self.assertIn('AC2: An unknown id returns 404', out)
+        self.assertNotIn('run', json.load(open(os.path.join(self.home, 'chats', 'sid-1.json'))))
+        self.assertIn('Started', self.chat('go'))
+        self.assertEqual(self.wait()['state'], 'paused')
+        self.assertIn('AC1: The list shows 10 transfers', self.prompt('investigate'))
+
+    def test_paste_again_after_stop_starts_a_new_run(self):
+        self.agents(investigate_1=HANDOFF, investigate_2=HANDOFF)
+        self.chat(JIRA); self.wait(); first = self.run_dir()
+        self.chat('stop'); self.wait(states=('ended',))
+        self.assertIn('Started', self.chat(STORY))
+        self.assertNotEqual(self.run_dir(), first)
 
     def test_no_hook_falls_back_to_session_log_or_explains(self):
         self.agents(investigate_1=HANDOFF)
@@ -607,6 +664,26 @@ def sc_alive(pid):
 
 @unittest.skipIf(sc is None, 'controller not importable')
 class Helpers(unittest.TestCase):
+    def test_number_criteria_formats(self):
+        n = lambda t: sc.number_criteria(t)[1]
+        self.assertEqual(n(JIRA), 'AC1: The list shows the last 10 transfers\n  - newest first\nAC2: An unknown account id returns 404')
+        self.assertEqual(n('Acceptance Criteria\nThe user can:\nsee the list\nget a 404\n\nNotes\nx'), 'AC1: see the list\nAC2: get a 404')
+        self.assertEqual(n('Acceptance criteria:\n# filter by date\n# filter by payee\n## case-insensitive'),
+                         'AC1: filter by date\nAC2: filter by payee\n  - case-insensitive')
+        self.assertEqual(n('\u2022 shows 10\n\u2022 404 for unknown'), 'AC1: shows 10\nAC2: 404 for unknown')
+        self.assertEqual(n('## Acceptance criteria\n1. shows 10\n2. 404\n   - empty body\n## Definition of Done\n- tests'), 'AC1: shows 10\nAC2: 404\n  - empty body')
+        self.assertEqual(n('Story\nAC 1 - shows 10\nAC-2: 404'), 'AC1: shows 10\nAC2: 404')
+        self.assertEqual(n('Acceptance Criteria\nScenario: a\nGiven x\nWhen y\nThen z\nScenario: b\nGiven p\nThen q'),
+                         'AC1: Scenario: a\n  Given x\n  When y\n  Then z\nAC2: Scenario: b\n  Given p\n  Then q')
+        self.assertEqual(n('Given x\nWhen y\nThen z\nGiven p\nThen q'), 'AC1: Given x\n  When y\n  Then z\nAC2: Given p\n  Then q')
+        self.assertEqual(n('Acceptance Criteria\nGiven\tWhen\tThen\nx\ty\tz'), 'AC1: Given: x; When: y; Then: z')
+        self.assertEqual(n('Acceptance Criteria\n||Case||Expected||\n|unknown id|404|'), 'AC1: Case: unknown id; Expected: 404')
+        self.assertEqual(n('Acceptance criteria: shows 10'), 'AC1: shows 10')
+        self.assertEqual(n(STORY), 'AC1: the list shows the thing\nAC2: an unknown id returns 404')
+        for t in ('go', 'how do I use this?', ''):
+            self.assertEqual(n(t), '')
+        self.assertTrue(sc.number_criteria(JIRA)[2]); self.assertFalse(sc.number_criteria('shows 10\n404 for unknown')[2])
+
     def test_parse_criteria(self):
         s = '- AC1: first\n  continued\n- AC2: second\n- a note bullet\n\n**AC3:** bold\nAC4: plain\n- sub bullet\nAfter\n'
         self.assertEqual(sc.parse_criteria(s), '- AC1: first\n  continued\n- AC2: second\n**AC3:** bold\nAC4: plain\n- sub bullet')

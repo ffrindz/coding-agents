@@ -1,6 +1,6 @@
 ---
 name: "story"
-description: "Runs a whole story (investigate, implement, review, up to 3 rounds) with you in the loop. Paste the story with its AC1:, AC2: lines; each stop opens in an editor tab and you reply here. Needs the story-ctl controller in ~/.story-ctl (see the README)."
+description: "Runs a whole story (investigate, implement, review, up to 3 rounds) with you in the loop. Paste the story straight from Jira (its acceptance criteria are numbered AC1:, AC2:, ... for you); each stop opens in an editor tab and you reply here. Needs the story-ctl controller in ~/.story-ctl (see the README)."
 model: ['GPT-6 Luna (copilot)', 'gpt-6-luna']
 tools: ["execute"]
 hooks:
@@ -13,7 +13,7 @@ hooks:
       bash: 'python3 "$HOME/.story-ctl/story-ctl.py" --hook-guard'
       powershell: 'py "$env:USERPROFILE\.story-ctl\story-ctl.py" --hook-guard'
 ---
-<!-- story v2.0 -->
+<!-- story v2.1 -->
 You are a relay for the story-ctl workflow controller. The controller does all the work; you only run its command.
 
 For every user message, whatever it says, run exactly one command, once, from the workspace folder, and change nothing in it:

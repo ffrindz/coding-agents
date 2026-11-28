@@ -59,7 +59,7 @@ Use a fresh chat for each step so each agent starts from the report alone. The h
 
 ### Run a whole story in the agent window (recommended)
 
-1. Open the repository you are changing, start a new chat, pick **story** in the agent dropdown and paste the story with its acceptance criteria (lines starting `AC1:`, `AC2:`, ...; a criterion can continue on indented or bulleted lines below it).
+1. Open the repository you are changing, start a new chat, pick **story** in the agent dropdown and paste the story as you copied it from Jira. The controller numbers the acceptance criteria `AC1:`, `AC2:`, ... itself, without a model, and shows them in its first reply. It reads criteria under an "Acceptance criteria" heading as bullets, numbers, Jira markup, Given/When/Then, a table, or one per line. If you paste only the criteria with no heading or bullets, it shows how it numbered them and waits for `go`. If the numbering is wrong, reply `stop` and paste again. Criteria already written as `AC1:` lines are used as they are.
 2. Within seconds it replies "Started". The first time, VS Code asks you to approve the `story-ctl.py --chat` command; allow it for good (for that exact command) so later messages run without a prompt.
 3. When the plan is ready it opens in an editor tab; press Cmd+Shift+V (Ctrl+Shift+V) for the preview, where code links open the files. Reply in the same chat:
 
@@ -84,7 +84,7 @@ How it stays reliable: the story agent never orchestrates. For every message it 
 `tools/story-ctl.py` is the workflow controller the story agent relays to; you can also run it directly in VS Code's terminal. The bookkeeping is code instead of a model: handoffs and reports are passed on byte for byte, all your answers go to every later task, verdicts and rounds are read and counted exactly, and it always stops after the handoff and when a review has questions. In tests it ran 30 stories with no orchestration mistake (a model-run story agent made one in about 1 run in 6). It needs Python 3 and the Copilot CLI.
 
 1. Install it as in [Setup](#setup) (or copy `tools/story-ctl.py` anywhere).
-2. Save the story with its acceptance criteria (lines starting `AC1:`, `AC2:`, ...; a criterion can continue on indented or bulleted lines below it) in a text file.
+2. Save the story in a text file, as copied from Jira. The criteria are numbered `AC1:`, `AC2:`, ... as in the agent window, and the numbered list is printed at the start. You can also write them as `AC1:` lines yourself; a criterion can continue on indented or bulleted lines below it.
 3. In VS Code's terminal, at the root of the repository you are changing: `python3 <path>/story-ctl.py story.txt --base main`
 4. At each stop it prints the agent's text and opens it in VS Code; press Cmd+Shift+V (Ctrl+Shift+V) for the Markdown preview, where code links open the files. Type your reply and finish with an empty line:
 

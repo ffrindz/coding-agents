@@ -10,7 +10,9 @@ usage (from the root of the repository you are changing, for example in VS Code'
     python3 <path>/story-ctl.py story.txt [--base main]
 
 story.txt holds the story with its acceptance criteria as lines starting "AC1:", "AC2:", ... (a criterion may
-continue on indented or bulleted lines below it).
+continue on indented or bulleted lines below it), or the story as copied from Jira: criteria under an
+"Acceptance criteria" heading (bullets, numbers, Jira markup, Given/When/Then, a table, or one per line) are
+numbered AC1:, AC2:, ... for you, without a model.
 At each stop the agent's text is printed and opened in VS Code (press Cmd+Shift+V for the Markdown preview,
 where the code links open the files). Type your reply and finish with an empty line:
   - "go" to continue, your answers, or "Change the plan: ..." at the handoff;
@@ -40,7 +42,7 @@ Tests: python3 tools/test_story_ctl.py (no Copilot, no credits).
 """
 import argparse, difflib, hashlib, json, os, re, shutil, signal, subprocess, sys, time
 
-VERSION = '1.3'
+VERSION = '1.4'
 READ_ONLY_DENY = ['write', 'shell(git push)', 'shell(git commit)', 'shell(git reset)', 'shell(git checkout)',
                   'shell(git stash)', 'shell(git clean)', 'shell(git restore)']
 WRITE_DENY = ['shell(git push)']
@@ -68,6 +70,115 @@ def parse_criteria(story):
         else:
             cur_ind = None
     return '\n'.join(out)
+
+# Acceptance criteria as copied from Jira (or anywhere): numbered as AC1:, AC2:, ... without a model.
+AC_HEAD_RE = re.compile(r'^\s*(?:h[1-6]\.\s*|#{1,6}\s+)?[*_]{0,2}\s*(?:acceptance\s+criteri(?:a|on)s?|a\.?c\.?s?)\b(?!\s*[#-]?\s*\d)[^:\n]{0,30}?[*_]{0,2}\s*(?::\s*(.*))?$', re.I)
+END_WORDS = (r'definition\s+of\s+(?:done|ready)|dod|dor|notes?|technical\s+notes|tech\s+notes|implementation\s+notes|'
+             r'out\s+of\s+scope|non[- ]goals?|dependencies|assumptions|risks?|designs?|mock-?ups?|attachments?|'
+             r'description|background|context|test(?:ing)?\s+notes|qa\s+notes|open\s+questions|questions|links?|'
+             r'resources|story\s+points|scope|summary|user\s+story|story|tasks?|sub-?tasks?|comments?|activity')
+END_RE = re.compile(r'^\s*(?:h[1-6]\.\s*.*|#{1,6}\s+[*_]{0,2}(?:' + END_WORDS + r')\b.*|[*_]{0,2}(?:' + END_WORDS + r')[*_]{0,2}\s*:?\s*[*_]{0,2})$', re.I)
+LABEL_RE = re.compile(r'^\s*[*_]{0,2}(?:AC|acceptance\s+criteri(?:a|on)|criteri(?:a|on)|scenario|req(?:uirement)?)\s*[#-]?\s*\d+[*_]{0,2}\s*(?:[:.)\-–—]\s*[*_]{0,2}\s*|\s+)(.*)$', re.I)
+MARK_RE = re.compile(r'^(\s*)(#+|\*+|[-+•◦▪▸►–—·]|\(?(?:\d{1,2}|[a-zA-Z])[.)])\s+(?:\[[ xX]\]\s+)?(.*\S)\s*$')
+GWT_RE = re.compile(r'^\s*[*_]{0,2}(given|when|then|and|but)\b', re.I)
+
+def _cells(l):
+    l = l.strip()
+    if '\t' in l: return [c.strip() for c in l.split('\t')], False
+    head = l.startswith('||')
+    return [c.strip() for c in re.split(r'\|\|?', l.strip('|'))], head
+
+def _number(lines, heading):
+    """Criteria (list of lists of lines: first line, then continuation lines) from the lines of an AC section."""
+    lines = [l.rstrip() for l in lines]
+    rows = [l for l in lines if l.strip()]
+    if rows and all('\t' in l or l.strip().startswith('|') for l in rows) and len(rows) >= 2:
+        cells = [_cells(l) for l in rows]
+        hdr = None
+        if cells[0][1] or all(len(c.split()) <= 3 and c for c in cells[0][0]):
+            hdr = cells.pop(0)[0]
+        out = []
+        for c, _ in cells:
+            if hdr and len(hdr) == len(c):
+                out.append(['; '.join(f'{h}: {v}' for h, v in zip(hdr, c) if v)])
+            else:
+                out.append([' | '.join(v for v in c if v)])
+        return [o for o in out if o[0]], []
+    items, depth = [], []
+    for l in lines:
+        m = LABEL_RE.match(l)
+        if m and m.group(1).strip():
+            items.append(('label', 0, m.group(1).strip())); continue
+        m = MARK_RE.match(l)
+        if m:
+            ind = len(m.group(1).expandtabs(4)); mk = m.group(2)
+            d = ind + (len(mk) - 1) * 2 if mk[0] in '#*' else ind
+            items.append(('mark', d, m.group(3).strip())); continue
+        items.append(('blank', 0, '') if not l.strip() else ('plain', len(l) - len(l.lstrip()), l.strip()))
+    marks = [d for k, d, _ in items if k == 'mark']
+    labels = any(k == 'label' for k, _, _ in items)
+    out, intro = [], []
+    if marks or labels:
+        top = min(marks) if marks else None
+        for k, d, t in items:
+            if k == 'label' or (k == 'mark' and d == top and not labels):
+                out.append([t])
+            elif k == 'mark' and out:
+                out[-1].append('- ' + t)
+            elif k == 'plain' and out:
+                out[-1].append(t)
+            elif k == 'plain':
+                intro.append(t)                         # an intro line such as "The user can:"
+        return out, intro
+    texts = [t for k, _, t in items if k == 'plain']
+    if any(GWT_RE.match(t) for t in texts):               # Given/When/Then scenarios without bullets
+        for t in texts:
+            w = GWT_RE.match(t); w = w.group(1).lower() if w else None
+            steps = bool(out) and any(GWT_RE.match(x) for x in out[-1])
+            if not out or (steps and w in (None, 'given')): out.append([t])
+            else: out[-1].append(t)
+        return out, []
+    if heading or len(texts) >= 2:                       # one criterion per line (bullets lost in the copy)
+        intro = texts[:1] if texts and texts[0].endswith(':') else []
+        return [[t] for t in texts[len(intro):]], intro
+    return [], []
+
+def number_criteria(story):
+    """(story with its acceptance criteria numbered "AC1:", "AC2:", ..., the numbered criteria, sure), or
+    (story, '', False) when no criteria can be found. A story that already has AC lines is returned as it is.
+    sure is False when the only evidence is plain lines with no heading, bullets or Given/When/Then: the
+    developer confirms those before the run starts."""
+    if parse_criteria(story):
+        return story, parse_criteria(story), True
+    lines = story.splitlines()
+    start = next((i for i, l in enumerate(lines) if AC_HEAD_RE.match(l)), None)
+    if start is not None:
+        first = (AC_HEAD_RE.match(lines[start]).group(1) or '').strip()
+        end = next((j for j in range(start + 1, len(lines)) if END_RE.match(lines[j]) and not AC_HEAD_RE.match(lines[j])), len(lines))
+        crit, intro = _number(([first] if first else []) + lines[start + 1:end], True)
+        before, after = (lines[:start + 1] if not first else lines[:start] + ['Acceptance criteria:']) + intro, lines[end:]
+    else:
+        crit, _ = _number(lines, False)
+        if not crit:
+            return story, '', False
+        # keep any text before the first criterion (a title, a description) as it is
+        firsttext = crit[0][0]
+        k = next((i for i, l in enumerate(lines) if firsttext in l), 0)
+        before, after = lines[:k], []
+        if before and before[-1].strip(): before.append('')
+        before.append('Acceptance criteria:')
+    crit = [c for c in crit if c and c[0]]
+    if not crit:
+        return story, '', False
+    block = []
+    for n, c in enumerate(crit, 1):
+        block.append(f'AC{n}: {c[0]}')
+        block += ['  ' + x for x in c[1:]]
+    tail = [''] + after if after else []
+    new = '\n'.join(before + block + tail).rstrip() + '\n'
+    plain = all(MARK_RE.match(l) is None and LABEL_RE.match(l) is None and GWT_RE.match(l) is None and '\t' not in l
+                and not l.strip().startswith('|') for l in lines)
+    return new, parse_criteria(new), start is not None or not plain
 
 def strip_fences(r):
     return re.sub(r'^```.*?^```[^\n]*$', '', r, flags=re.M | re.S)
@@ -526,7 +637,8 @@ def stats():
 # its preToolUse hook (--hook-guard) denies every other command. --chat starts or continues the run in the
 # background and returns at once; each stop opens in an editor tab, and your next chat message is the reply.
 
-CHAT_HELP = ('Paste a story with its acceptance criteria (lines starting "AC1:", "AC2:", ...) to start. At each stop '
+CHAT_HELP = ('Paste a story with its acceptance criteria to start (straight from Jira is fine: the criteria are numbered '
+             'AC1:, AC2:, ... for you). At each stop '
              'the plan or review opens in an editor tab; reply here with `go`, your answers, a question ending in `?`, '
              'or `stop`. Other messages: `status`, `resume` (continue the last stopped run in this repository), '
              '`stats`, `report`.')
@@ -669,6 +781,34 @@ def chat():
     json.dump(ch, open(cf, 'w'))
     print(out)
 
+def chat_start(ch, msg, word):
+    """Start a story from a pasted message: criteria numbered as AC1:, AC2:, ... first if they are not."""
+    global S
+    pending = ch.pop('pending', None)
+    if pending and word in ('go', 'yes', 'y', 'ok', 'start'):
+        story, crit, sure = pending, parse_criteria(pending), True
+    else:
+        story, crit, sure = number_criteria(msg)
+    if not crit:
+        return ('I could not find acceptance criteria in your message. Paste the whole story from Jira, with its '
+                '"Acceptance criteria" heading and the criteria below it (or lines starting "AC1:", "AC2:", ...). '
+                'Other messages: `status`, `resume`, `stats`, `report`, `help`.')
+    shown = '```text\n' + crit + '\n```'
+    if not sure:
+        ch['pending'] = story
+        return (f'I read these lines as the acceptance criteria:\n\n{shown}\n\nReply `go` to start with them, or paste '
+                'the story again with an "Acceptance criteria" line above the criteria.')
+    S = run = os.path.join(runs_dir(), new_run_id())
+    os.makedirs(run, exist_ok=True)
+    sf = os.path.join(run, 'story.txt'); open(sf, 'w').write(story.rstrip('\n') + '\n')
+    if story.strip() != msg.strip() and not pending:
+        open(os.path.join(run, 'story-pasted.txt'), 'w').write(msg + '\n')
+    launch([sf, '--state', run, '--step', '--base', a.base, *passthrough()], run)
+    ch['run'] = run
+    head = 'Started.' if story.strip() == msg.strip() else f'Started with these acceptance criteria, numbered from your paste:\n\n{shown}\n\nIf they are wrong, reply `stop` and paste the story again.'
+    return (head + ' Investigate is reading the code; the plan opens in an editor tab when it is ready '
+            '(usually a few minutes). Reply here then. Send `status` any time.')
+
 def chat_reply(ch, msg):
     global S
     word = msg.lower().rstrip('.!')
@@ -691,16 +831,8 @@ def chat_reply(ch, msg):
             try: run = resolve_run('last')
             except SystemExit as e: return str(e)
             ch['run'] = run; msg = word = 'resume'
-        elif parse_criteria(msg):
-            S = run = os.path.join(runs_dir(), new_run_id())
-            os.makedirs(run, exist_ok=True)
-            sf = os.path.join(run, 'story.txt'); open(sf, 'w').write(msg + '\n')
-            launch([sf, '--state', run, '--step', '--base', a.base, *passthrough()], run)
-            ch['run'] = run
-            return ('Started. Investigate is reading the code; the plan opens in an editor tab when it is ready '
-                    '(usually a few minutes). Reply here then. Send `status` any time.')
         else:
-            return CHAT_HELP
+            return chat_start(ch, msg, word)
     st = run_status(run)
     if word == 'status': return describe(run, st)
     if st['state'] in ('running', 'starting'):
@@ -715,6 +847,8 @@ def chat_reply(ch, msg):
         rf = os.path.join(run, f'chat-reply-{int(time.time() * 1000)}.txt'); open(rf, 'w').write(msg)
         launch(['--resume', run, '--step', '--reply-file', rf, *passthrough()], run)
         return 'Got it. Continuing; the next stop opens in an editor tab. Send `status` any time.'
+    if st['state'] in ('interrupted', 'ended') and word not in ('resume', 'continue', 'go', 'retry') and number_criteria(msg)[1]:
+        return chat_start(ch, msg, word)                    # a new story (or the same one pasted again) in this chat
     if st['state'] == 'interrupted' or (st['state'] == 'ended' and st.get('resumable')):
         if word not in ('resume', 'continue', 'go', 'retry'):
             return describe(run, st)
@@ -771,6 +905,12 @@ def main(argv=None):
         if not a.story: ap.error('a story file is needed (or --resume, --report, --stats)')
         INV, IMP, REV = a.agents.split(',')
         story = open(a.story).read().strip()
+        if not parse_criteria(story):
+            story, crit, _ = number_criteria(story)
+            if not crit:
+                sys.exit('No acceptance criteria found in the story file: put them under an "Acceptance criteria" line, or start each with "AC1:", "AC2:", ...')
+            story = story.strip()
+            print('[story-ctl] acceptance criteria numbered from the story:\n' + crit, file=sys.stderr)
         rc, out = git('rev-parse', '--verify', '--quiet', a.base + '^{commit}')
         if rc:
             sys.exit(f'--base {a.base} is not a commit in this repository (run story-ctl from the repository root).')

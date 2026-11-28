@@ -11,7 +11,11 @@ Every change was tested before and after with headless Copilot CLI runs on publi
 | review | v3.38 | GPT-6.1 Sol, fallback GPT-6 Luna |
 | explain | v1.10 | GPT-6 Luna |
 | spec | v1.22 | GPT-6 Luna |
-| story | v2.0 | GPT-6 Luna (relay only); the agents use their own models |
+| story | v2.1 | GPT-6 Luna (relay only); the agents use their own models |
+
+## 2026-11-28
+
+- **story v2.1 and workflow controller v1.4: paste the story straight from Jira.** Why: the first real try failed at the first message. A story copied from Jira has no `AC1:` lines, so the controller replied with its help text and nothing started. Now the controller numbers the criteria `AC1:`, `AC2:`, ... itself, in code and without a model, and shows the numbered list in its first reply. Criteria are found under an "Acceptance criteria" heading (Jira's `h3.`, Markdown, bold, or plain text, ending at the next heading such as Notes or Definition of Done) as bullets (`*`, `-`, `•`, Jira's `#`), numbers, `AC 1 -` labels, Given/When/Then scenarios, a Jira or tab-separated table, or one per line. Nested bullets stay with their criterion. With no heading, it uses bullets, labels, Given/When/Then or a table anywhere in the paste. Plain lines with none of these are shown first and wait for `go`. The rest of the story is kept, and the paste as typed is saved next to the numbered `story.txt`. After a stop, a new paste in the same chat starts a new run. The terminal mode numbers a story file the same way. The story agent's only change is its description. Tests: 5 new offline tests (61 in all). Live with the relay (GPT-6 Luna) on a rendered Jira paste: v2.0/v1.3 answered with the help text, while v2.1/v1.4 started with AC1–AC3 and investigate's plan covered all three (0.3 credits). It was then stopped at the handoff.
 
 ## 2026-11-27
 
