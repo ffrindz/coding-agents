@@ -47,9 +47,9 @@ first in the repository, <agent>-<k>.exit the exit code, <agent>-<k>.credits the
 Copilot session log for the progress page); --reply-cmd answers stops from a command.
 Tests: python3 tools/test_story_ctl.py (no Copilot, no credits).
 """
-import argparse, difflib, hashlib, json, os, re, shutil, signal, subprocess, sys, time, uuid
+import argparse, difflib, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, time, uuid
 
-VERSION = '1.7'
+VERSION = '1.8'
 READ_ONLY_DENY = ['write', 'shell(git push)', 'shell(git commit)', 'shell(git reset)', 'shell(git checkout)',
                   'shell(git stash)', 'shell(git clean)', 'shell(git restore)']
 WRITE_DENY = ['shell(git push)']
@@ -89,16 +89,19 @@ LABEL_RE = re.compile(r'^\s*[*_]{0,2}(?:AC|acceptance\s+criteri(?:a|on)|criteri(
 MARK_RE = re.compile(r'^(\s*)(#+|\*+|[-+•◦▪▸►–—·]|\(?(?:\d{1,2}|[a-zA-Z])[.)])\s+(?:\[[ xX]\]\s+)?(.*\S)\s*$')
 GWT_RE = re.compile(r'^\s*[*_]{0,2}(given|when|then|and|but)\b', re.I)
 
+SEP_RE = re.compile(r'^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$')     # a Markdown table's |---|---| row
+
 def _cells(l):
     l = l.strip()
     if '\t' in l: return [c.strip() for c in l.split('\t')], False
     head = l.startswith('||')
-    return [c.strip() for c in re.split(r'\|\|?', l.strip('|'))], head
+    l = re.sub(r'^\|\|?|(?<!\\)\|\|?$', '', l)
+    return [c.strip().replace('\\|', '|') for c in re.split(r'(?<!\\)\|\|?', l)], head
 
 def _number(lines, heading):
     """Criteria (list of lists of lines: first line, then continuation lines) from the lines of an AC section."""
     lines = [l.rstrip() for l in lines]
-    rows = [l for l in lines if l.strip()]
+    rows = [l for l in lines if l.strip() and not SEP_RE.match(l)]
     if rows and all('\t' in l or l.strip().startswith('|') for l in rows) and len(rows) >= 2:
         cells = [_cells(l) for l in rows]
         hdr = None
@@ -107,7 +110,7 @@ def _number(lines, heading):
         out = []
         for c, _ in cells:
             if hdr and len(hdr) == len(c):
-                out.append(['; '.join(f'{h}: {v}' for h, v in zip(hdr, c) if v)])
+                out.append(['; '.join(f'{h}: {v or "(empty)"}' for h, v in zip(hdr, c) if h or v)])
             else:
                 out.append([' | '.join(v for v in c if v)])
         return [o for o in out if o[0]], []
@@ -117,6 +120,8 @@ def _number(lines, heading):
         if m and m.group(1).strip():
             items.append(('label', 0, m.group(1).strip())); continue
         m = MARK_RE.match(l)
+        if m and LABEL_RE.match(m.group(3)) and LABEL_RE.match(m.group(3)).group(1).strip():
+            items.append(('label', 0, LABEL_RE.match(m.group(3)).group(1).strip())); continue     # "- AC1: ..."
         if m:
             ind = len(m.group(1).expandtabs(4)); mk = m.group(2)
             d = ind + (len(mk) - 1) * 2 if mk[0] in '#*' else ind
@@ -150,18 +155,38 @@ def _number(lines, heading):
         return [[t] for t in texts[len(intro):]], intro
     return [], []
 
+def criteria_problem(story):
+    """Why AC lines already in the story cannot be used as they are: labels in two styles ("AC1:" and
+    "AC 2 -"), or a number used twice. '' when they can."""
+    canon, other = [], []
+    for l in story.splitlines():
+        if AC_RE.match(l): canon.append(re.search(r'AC(\d+)', l).group(1)); continue
+        t = MARK_RE.match(l).group(3) if MARK_RE.match(l) else l
+        m = re.match(r'\s*[*_]{0,2}AC\s*[#-]?\s*(\d+)', t, re.I)
+        if m and LABEL_RE.match(t): other.append(m.group(1))
+    if canon and other: return 'the criteria are labelled in two styles'
+    ids = canon or other
+    if len(ids) != len(set(ids)): return 'a criterion number is used twice'
+    return ''
+
 def number_criteria(story):
     """(story with its acceptance criteria numbered "AC1:", "AC2:", ..., the numbered criteria, sure), or
-    (story, '', False) when no criteria can be found. A story that already has AC lines is returned as it is.
-    sure is False when the only evidence is plain lines with no heading, bullets or Given/When/Then: the
-    developer confirms those before the run starts."""
-    if parse_criteria(story):
-        return story, parse_criteria(story), True
+    (story, '', False) when no criteria can be found. A story whose AC lines are consistent is returned as it is.
+    sure is False when the developer should confirm the numbering before the run starts: criteria found without
+    an "Acceptance criteria" heading in a paste that has other text before them, plain lines only, or AC labels
+    that had to be renumbered (two styles, or a number used twice)."""
+    crit0 = parse_criteria(story)
+    problem = criteria_problem(story) if crit0 else ''
+    if crit0 and not problem:
+        return story, crit0, True
     lines = story.splitlines()
     start = next((i for i, l in enumerate(lines) if AC_HEAD_RE.match(l)), None)
     if start is not None:
         first = (AC_HEAD_RE.match(lines[start]).group(1) or '').strip()
-        end = next((j for j in range(start + 1, len(lines)) if END_RE.match(lines[j]) and not AC_HEAD_RE.match(lines[j])), len(lines))
+        lvl = re.match(r'\s*(#{1,6})\s', lines[start])
+        md_end = re.compile(r'^\s*#{1,%d}\s+\S' % len(lvl.group(1))) if lvl else None     # a Markdown heading of the same level ends it
+        end = next((j for j in range(start + 1, len(lines)) if not AC_HEAD_RE.match(lines[j]) and
+                    (END_RE.match(lines[j]) or (md_end and md_end.match(lines[j])))), len(lines))
         crit, intro = _number(([first] if first else []) + lines[start + 1:end], True)
         before, after = (lines[:start + 1] if not first else lines[:start] + ['Acceptance criteria:']) + intro, lines[end:]
     else:
@@ -172,6 +197,7 @@ def number_criteria(story):
         firsttext = crit[0][0]
         k = next((i for i, l in enumerate(lines) if firsttext in l), 0)
         before, after = lines[:k], []
+        lead = any(l.strip() for l in before)
         if before and before[-1].strip(): before.append('')
         before.append('Acceptance criteria:')
     crit = [c for c in crit if c and c[0]]
@@ -185,12 +211,15 @@ def number_criteria(story):
     new = '\n'.join(before + block + tail).rstrip() + '\n'
     plain = all(MARK_RE.match(l) is None and LABEL_RE.match(l) is None and GWT_RE.match(l) is None and '\t' not in l
                 and not l.strip().startswith('|') for l in lines)
-    return new, parse_criteria(new), start is not None or not plain
+    labelled = any(re.match(r'\s*(?:[-*]\s+)?[*_]{0,2}AC\s*[#-]?\s*\d', l, re.I) for l in lines)
+    problem = problem or criteria_problem(story)
+    sure = not problem and (start is not None or (not plain and (labelled or not lead)))
+    return new, parse_criteria(new), sure
 
 def strip_fences(r):
-    return re.sub(r'^```.*?^```[^\n]*$', '', r, flags=re.M | re.S)
+    return re.sub(r'^(```|~~~).*?^\1[^\n]*$', '', r, flags=re.M | re.S)
 
-def verdict_check(r):
+def verdict_check(r, n_criteria=None):
     """(verdict, problem). The verdict comes only from the single '- **Verdict:**' line outside code fences."""
     body = strip_fences(r)
     lines = re.findall(r'^\s*-\s*\*\*Verdict:\*\*[ \t]*(.*)$', body, re.M)
@@ -203,6 +232,11 @@ def verdict_check(r):
     b = re.search(r'blockers:\s*(\d+)', lines[0])
     if v == 'Approve' and b and int(b.group(1)) > 0:
         return None, f'Approve with {b.group(1)} blocker(s)'
+    c = re.search(r'(\d+)\s+of\s+(\d+)\s+criteri', lines[0])
+    if v == 'Approve' and c and int(c.group(1)) < int(c.group(2)):
+        return None, f'Approve with only {c.group(1)} of {c.group(2)} criteria met'
+    if v == 'Approve' and c and n_criteria and int(c.group(2)) < n_criteria:
+        return None, f'Approve counting {c.group(2)} criteria, but the story has {n_criteria}'
     return v, ''
 
 def verdict(r):
@@ -339,7 +373,7 @@ def write_log(result):
 def replay_next(kind):
     """During --resume: the next saved entry of this kind, or None once the saved run is used up."""
     global replay_i
-    while replay_i < len(replay) and replay[replay_i]['type'] in ('start', 'session'):
+    while replay_i < len(replay) and replay[replay_i]['type'] in ('start', 'session', 'pause'):
         replay_i += 1
     if replay_i >= len(replay): return None
     e = replay[replay_i]
@@ -401,19 +435,24 @@ def run_agent(agent, prompt, label, read_only):
             with open(lf, 'w') as out_f:
                 p = subprocess.Popen(cmd, stdout=out_f, stderr=subprocess.STDOUT, cwd=ROOT)
                 try:
-                    seen, tick = 0, 0
+                    seen, tick, warned = -1, 0, False
                     while True:
                         try: p.wait(timeout=2); break
                         except subprocess.TimeoutExpired: pass
-                        act.read(); tick += 1
-                        if len(act.acts) != seen or tick % 10 == 0:
-                            seen = len(act.acts); set_status('running', step=label, agent=agent)
+                        tick += 1
+                        try:                            # the live view is best effort: it never stops the agent
+                            act.read()
+                            if act.rev != seen or tick % 5 == 0:
+                                seen = act.rev; set_status('running', step=label, agent=agent)
+                        except (Exception, SystemExit) as e:
+                            if not warned: print(f'[story-ctl] live view not updated: {e!r}', file=sys.stderr); warned = True
                 except BaseException:
                     p.kill(); p.wait(); raise
             code = p.returncode
             log = open(lf, encoding='utf-8', errors='replace').read()
             cr = credits_in(log)
-            act.read()
+            try: act.read()
+            except Exception: pass
             ev = ev if os.path.exists(ev) else None
             if not ev:
                 old_sid = (re.findall(r'resume=([0-9a-f-]+)', log) or [None])[-1]
@@ -437,6 +476,11 @@ def run_agent(agent, prompt, label, read_only):
             actf = f'{step:02d}-{label}.activity.md'
             save(actf, f'# What {agent} did ({step_name(label)})\n\n' + (f'Model: {mdesc}\n\n' if mdesc else '') + '```text\n' + '\n'.join(activity_lines(LIVE['acts'], short=False)) + '\n```\n')
         LIVE = None
+        if final and read_only and code:        # never route on (or approve from) a process that failed
+            save(f'{step:02d}-{label}.failed.md', final)
+            print(f'\n[story-ctl] {agent} exited with code {code}, so its report is not used (attempt {attempt}); '
+                  f'see {step:02d}-{label}.failed.md', file=sys.stderr)
+            final = ''
         if final:
             save(f'{step:02d}-{label}.result.md', final)
             jwrite({'type': 'task', 'agent': agent, 'label': label, 'phash': phash(prompt), 'result': final, 'code': code,
@@ -451,7 +495,7 @@ def run_agent(agent, prompt, label, read_only):
         if touched:
             stop_with(f'Stopped — the {agent} step returned no report after changing files, so it was not retried '
                       f'over the partial edits. Nothing was reverted; its output is in {S}. Changed files:\n{changed_files()}')
-        print(f'\n[story-ctl] {agent} returned nothing (attempt {attempt}, exit code {code}); see {pf}', file=sys.stderr)
+        print(f'\n[story-ctl] {agent} returned no usable report (attempt {attempt}, exit code {code}); see {pf}', file=sys.stderr)
     stop_with(f'Stopped — the {agent} step failed twice; its output is in {S}. When the service is back, resume with '
               f'--resume {S}', resumable=True)
 
@@ -470,13 +514,21 @@ def ask(text, n, where, asked='', record=True):
     shown = re.sub(r'\]\((?!https?:|/|#|mailto:)([^)\s]+)\)', lambda m: f']({ROOT}/{m.group(1)})', text)
     stop_file = save(f'stop-{n}.md', shown)
     failed = ''
+    moved = repo_moved(where) if reply_text is not None else ''
+    if moved:                                   # do not act on a reply given for a repository that has changed since
+        reply_text = None
+        text = (f'**Your reply was not used:** {moved} since this stop opened. Check that this is what you want, then reply '
+                'again (go, your answers, or stop) to continue on the repository as it is now.\n\n---\n\n' + text)
+        shown = re.sub(r'\]\((?!https?:|/|#|mailto:)([^)\s]+)\)', lambda m: f']({ROOT}/{m.group(1)})', text)
+        stop_file = save(f'stop-{n}.md', shown)
     if reply_text is not None:                  # chat mode: the developer's message, captured by the hook
         r, reply_text = reply_text, None
         print(f'[story-ctl] your reply at {where} (from the chat)')
     elif a.step:                                # chat mode: pause; the next chat message resumes the run
-        open_in_editor(stop_file); notify(stop_note(where))
         jwrite({'type': 'session', 'seconds': round(time.monotonic() - t0)})
+        jwrite({'type': 'pause', 'where': where, **repo_state()})
         set_status('paused', where=where, stop_file=stop_file)
+        open_in_editor(stop_file); notify(stop_note(where))
         print(f'[story-ctl] paused at {where}: {stop_file}')
         sys.exit(10)
     else:
@@ -522,8 +574,10 @@ def notify(text):
     if os.environ.get('STORY_CTL_NOTIFY', '1').strip().lower() in ('0', 'off', 'no', 'false'): return
     title = 'Story: ' + story_title()
     env = dict(os.environ, STORY_CTL_N_TITLE=title, STORY_CTL_N_TEXT=text)
+    if os.environ.get('STORY_CTL_NOTIFY', '').strip().lower() == 'private': title = 'Story'      # no story title on a lock screen
+    env['STORY_CTL_N_TITLE'] = title
     own = os.environ.get('STORY_CTL_NOTIFY_CMD')
-    if own: cmd = [*own.split(), title, text]
+    if own: cmd = [*shlex.split(own, posix=os.name != 'nt'), title, text]
     elif sys.platform == 'darwin':
         cmd = ['osascript', '-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)',
                '-e', 'end run', title, text]
@@ -540,10 +594,23 @@ def stop_note(where):
     if 'implement' in where: return 'Implement could not finish a round (in an editor tab). Reply in the chat: review, an instruction, or stop.'
     return f'Waiting for your reply at {where} (in an editor tab). Reply in the chat.'
 
+def repo_state():
+    _, h = git('rev-parse', '--verify', '--quiet', 'HEAD'); _, b = git('symbolic-ref', '--short', '-q', 'HEAD')
+    return {'head': h.decode().strip(), 'branch': b.decode().strip() or '(detached)'}
+
+def repo_moved(where):
+    """What changed in the repository since the run paused at this stop: a branch switch or a new commit."""
+    pauses = [e for e in load_journal(S) if e['type'] == 'pause' and e['where'] == where]
+    if not pauses or 'head' not in pauses[-1]: return ''
+    was, now = pauses[-1], repo_state()
+    if was['branch'] != now['branch']: return f"the branch changed from {was['branch']} to {now['branch']}"
+    if was['head'] != now['head']: return f"{now['branch']} moved from commit {was['head'][:9]} to {now['head'][:9]}"
+    return ''
+
 def open_in_editor(path):
     if a.no_open: return
     ed = os.environ.get('STORY_CTL_EDITOR')
-    ed = (ed.split() if ' ' in ed and not os.path.exists(ed) else [ed]) if ed else ([shutil.which('code')] if shutil.which('code') else None)
+    ed = (shlex.split(ed, posix=os.name != 'nt') if not os.path.exists(ed) else [ed]) if ed else ([shutil.which('code')] if shutil.which('code') else None)
     if ed:
         try: subprocess.run([*ed, '-r', path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
         except (OSError, subprocess.SubprocessError): pass
@@ -556,7 +623,7 @@ def set_status(state, **kw):
     tmp = os.path.join(S, 'status.json.tmp')
     json.dump(st, open(tmp, 'w')); os.replace(tmp, os.path.join(S, 'status.json'))
     try: write_progress(st)
-    except Exception as e: print(f'[story-ctl] progress page not updated: {e}', file=sys.stderr)
+    except (Exception, SystemExit) as e: print(f'[story-ctl] progress page not updated: {e!r}', file=sys.stderr)
 
 def answers_block():
     if not answers: return ''
@@ -637,6 +704,7 @@ class Activity:
     def __init__(self, path):
         self.path, self.pos, self.buf, self.acts, self.idx = path, 0, '', [], {}
         self.model, self.effort, self.used = None, None, []        # used: model names in the order they answered
+        self.rev = 0                                                # bumped by every change the page shows
     def read(self):
         try:
             with open(self.path, encoding='utf-8', errors='replace') as f:
@@ -645,28 +713,31 @@ class Activity:
             return self.acts
         lines = (self.buf + data).split('\n'); self.buf = lines.pop()
         for l in lines:
-            try: e = json.loads(l)
-            except ValueError: continue
-            t, d = e.get('type'), e.get('data') or {}
-            if t == 'session.model_change' and d.get('newModel'):
-                self.model, self.effort = d['newModel'], d.get('reasoningEffort') or self.effort
-            elif t == 'session.usage_record':
-                u = d.get('usage') or {}
-                name = u.get('modelDisplayName') or u.get('model')
-                if name and u.get('model') != 'none':
-                    self.model, self.effort = name, u.get('reasoningEffort') or self.effort
-                    if name not in self.used: self.used.append(name)
-            if t == 'assistant.message' and d.get('toolRequests') and (d.get('content') or '').strip():
-                self.acts.append(['note', _short(d['content'], 150), ''])
-            elif t == 'tool.execution_start' and d.get('toolName') not in ACT_SKIP:
-                self.idx[d.get('toolCallId')] = len(self.acts)
-                self.acts.append(describe_tool(d.get('toolName', ''), d.get('arguments')))
-            elif t == 'tool.execution_complete' and d.get('toolCallId') in self.idx:
-                x = self.acts[self.idx.pop(d['toolCallId'])]
-                code = (d.get('shellExecution') or {}).get('exitCode')
-                if x[0] == 'run' and code is not None: x[2] = '✓' if code == 0 else f'✗ exit {code}'
-                elif d.get('success') is False: x[2] = '✗ failed'
+            try: self._event(json.loads(l))
+            except Exception: continue          # a line in a shape we do not know: skip it
         return self.acts
+    def _event(self, e):
+        if not isinstance(e, dict): return
+        t, d = e.get('type'), e.get('data') if isinstance(e.get('data'), dict) else {}
+        self.rev += 1
+        if t == 'session.model_change' and d.get('newModel'):
+            self.model, self.effort = d['newModel'], d.get('reasoningEffort') or self.effort
+        elif t == 'session.usage_record':
+            u = d.get('usage') or {}
+            name = u.get('modelDisplayName') or u.get('model')
+            if name and u.get('model') != 'none':
+                self.model, self.effort = name, u.get('reasoningEffort') or self.effort
+                if name not in self.used: self.used.append(name)
+        if t == 'assistant.message' and d.get('toolRequests') and (d.get('content') or '').strip():
+            self.acts.append(['note', _short(d['content'], 150), ''])
+        elif t == 'tool.execution_start' and d.get('toolName') not in ACT_SKIP:
+            self.idx[d.get('toolCallId')] = len(self.acts)
+            self.acts.append(describe_tool(d.get('toolName', ''), d.get('arguments')))
+        elif t == 'tool.execution_complete' and d.get('toolCallId') in self.idx:
+            x = self.acts[self.idx.pop(d['toolCallId'])]
+            code = (d.get('shellExecution') or {}).get('exitCode')
+            if x[0] == 'run' and code is not None: x[2] = '✓' if code == 0 else f'✗ exit {code}'
+            elif d.get('success') is False: x[2] = '✗ failed'
 
 def model_desc(act):
     """"GPT-6.1 Sol, effort medium", or "GPT-6.1 Sol → GPT-6 Luna, effort medium" after a fallback."""
@@ -713,14 +784,17 @@ def write_progress(st):
         L += ['## Acceptance criteria', '', '```text', crit, '```', '']
     L += ['## Steps', '']
     open_start = None
-    for e in load_journal(S):
+    try: entries = load_journal(S)
+    except SystemExit: entries = []             # a damaged journal is reported on resume, not here
+    for e in entries:
         if e['type'] == 'start':
             if open_start and open_start is not LIVE: L.append(f"- ✗ {step_name(open_start['label'])}: ended without a report")
             open_start = e
         elif e['type'] == 'task':
             open_start = None
             f = e.get('file')
-            L.append(f"- ✓ {step_name(e['label'])}" + (f" · {e['model']}" if e.get('model') else '') + f" · {_mins(e.get('seconds', 0))} · {_cr(e.get('credits', 0))}"
+            mark = '✓' if not e.get('code') else f"⚠ exit code {e['code']}:"
+            L.append(f"- {mark} {step_name(e['label'])}" + (f" · {e['model']}" if e.get('model') else '') + f" · {_mins(e.get('seconds', 0))} · {_cr(e.get('credits', 0))}"
                      + (f' · [report]({f})' if f else '') + (f" · [activity]({e['activity']})" if e.get('activity') else ''))
         elif e['type'] == 'reply':
             L.append(f"- ↩ your reply at {e['where']}: “{_short(e['text'] or '(empty)', 120)}”")
@@ -763,8 +837,19 @@ def resolve_run(x):
     return runs[-1]
 
 def load_journal(d):
+    """The journal's entries. A last line cut off by a kill is dropped (that entry never finished); a damaged
+    line anywhere else stops with a message instead of guessing."""
     p = os.path.join(d, 'journal.jsonl')
-    return [json.loads(l) for l in open(p)] if os.path.exists(p) else []
+    if not os.path.exists(p): return []
+    lines = open(p, encoding='utf-8', errors='replace').read().split('\n')
+    out = []
+    for i, l in enumerate(lines):
+        if not l.strip(): continue
+        try: out.append(json.loads(l))
+        except ValueError:
+            if any(x.strip() for x in lines[i + 1:]):
+                sys.exit(f'The journal of {d} is damaged at line {i + 1}; the run cannot be resumed safely. Start a new run.')
+    return out
 
 def prepare_resume(d):
     """Cut the saved journal back to the point where the run can go on. Returns (entries, interrupted step)."""
@@ -781,9 +866,12 @@ def prepare_resume(d):
     last_done = max([i for i, e in enumerate(j) if e['type'] in ('task', 'reply')] or [-1])
     starts = [e for e in j[last_done + 1:] if e['type'] == 'start']
     interrupted = starts[-1] if starts and not ends else None     # killed mid-step (no end written)
-    os.replace(os.path.join(d, 'journal.jsonl'), os.path.join(d, 'journal.prev.jsonl'))
-    with open(os.path.join(d, 'journal.jsonl'), 'w') as f:
+    tmp = os.path.join(d, 'journal.jsonl.tmp')
+    with open(tmp, 'w') as f:
         for e in j: f.write(json.dumps(e) + '\n')
+        f.flush(); os.fsync(f.fileno())
+    shutil.copyfile(os.path.join(d, 'journal.jsonl'), os.path.join(d, 'journal.prev.jsonl'))
+    os.replace(tmp, os.path.join(d, 'journal.jsonl'))
     return j, interrupted
 
 def report(d):
@@ -868,7 +956,7 @@ CHAT_HELP = ('Paste a story with its acceptance criteria to start (straight from
              'the plan or review opens in an editor tab; reply here with `go`, your answers, a question ending in `?`, '
              'or `stop`. Other messages: `status`, `resume` (continue the last stopped run in this repository), '
              '`stats`, `report`.')
-CHAT_CMD = re.compile(r'''^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)?(?:python3?|py)(?:\s+-I)?\s+(?:"[^"]*story-ctl\.py"|'[^']*story-ctl\.py'|[^"'\s;&|<>`$()]*story-ctl\.py|"\$env:[^"]*story-ctl\.py")\s+--chat\s*(?:2>&1)?\s*$''')
+CHAT_CMD = re.compile(r'''^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)?(?:python3?|py)(?:\s+-I)?\s+(?:"[^"]*story-ctl\.py"|'[^']*story-ctl\.py'|[^"'\s;&|<>`$()]*story-ctl\.py|\$HOME/[^"'\s;&|<>`$()]*story-ctl\.py|"\$env:[^"]*story-ctl\.py")\s+--chat\s*(?:2>&1)?\s*$''')
 READ_ONLY_TOOLS = {'read_bash', 'list_bash', 'get_terminal_output', 'read_powershell', 'list_powershell'}
 
 def home():
@@ -889,6 +977,28 @@ def hook_prompt():
     json.dump({'sessionId': sid, 'prompt': prompt, 'cwd': d.get('cwd') or os.getcwd(), 'ts': time.time()}, open(tmp, 'w'))
     os.replace(tmp, os.path.join(home(), 'inbox', sid + '.json'))
 
+SCRIPT_ARG_RE = re.compile(r'''(?:python3?|py)(?:\s+-I)?\s+("[^"]*"|'[^']*'|\S+)\s+--chat''')
+
+def trusted_script(cmd):
+    """True when the --chat command runs the installed controller (~/.story-ctl/story-ctl.py, or the one in
+    $STORY_CTL_HOME), not another file of the same name."""
+    m = SCRIPT_ARG_RE.search(cmd)
+    if not m: return False
+    tok = m.group(1); q = tok[0] if tok[:1] in ('"', "'") else ''
+    if os.name != 'nt' and '\\' in tok: return False     # a backslash is part of the file name there, not a separator
+    path = tok[1:-1] if q else tok
+    # what a shell would expand: ~ only unquoted; $HOME, ${HOME} and $env:USERPROFILE unquoted or in double quotes
+    pres = [] if q == "'" else ['$env:USERPROFILE', '%USERPROFILE%', '${HOME}', '$HOME'] + ([] if q else ['~'])
+    for pre in pres:
+        if path.startswith(pre) and (len(path) == len(pre) or path[len(pre)] in '/\\'):
+            base = (os.environ.get('USERPROFILE') if 'USERPROFILE' in pre else None) or os.path.expanduser('~')
+            path = base + path[len(pre):]; break
+    def norm(x):
+        return os.path.normcase(os.path.normpath(x))
+    homes = {os.path.expanduser('~'), os.environ.get('HOME') or '', os.environ.get('USERPROFILE') or ''} - {''}
+    ok = {norm(os.path.join(h, '.story-ctl', 'story-ctl.py')) for h in homes} | {norm(os.path.join(home(), 'story-ctl.py'))}
+    return norm(path) in ok
+
 def hook_guard():
     """preToolUse hook of the story agent: allow only the story-ctl --chat command."""
     d = hook_input()
@@ -898,7 +1008,7 @@ def hook_guard():
         try: args = json.loads(args)
         except ValueError: args = {'command': args}
     cmd = (args or {}).get('command') if isinstance(args, dict) else None
-    if name in READ_ONLY_TOOLS or (isinstance(cmd, str) and CHAT_CMD.match(cmd)):
+    if name in READ_ONLY_TOOLS or (isinstance(cmd, str) and CHAT_CMD.match(cmd) and trusted_script(cmd)):
         print('{}'); return
     print(json.dumps({'permissionDecision': 'deny', 'permissionDecisionReason':
                       'The story agent may only run the story-ctl --chat command shown in its instructions.'}))
@@ -949,7 +1059,12 @@ def pid_alive(pid):
 def run_status(run):
     try: st = json.load(open(os.path.join(run, 'status.json')))
     except (OSError, ValueError): st = {'state': 'starting'}
-    if st['state'] in ('running', 'starting') and not pid_alive(st.get('pid')) and time.time() - st.get('updated', 0) > 5:
+    pid = st.get('pid')
+    if not pid:
+        try: pid = int(open(os.path.join(run, 'worker.pid')).read().strip())
+        except (OSError, ValueError): pid = None
+    st['pid'] = pid
+    if st['state'] in ('running', 'starting') and not pid_alive(pid) and time.time() - st.get('updated', 0) > (5 if pid else 30):
         st['state'] = 'interrupted'
     return st
 
@@ -981,8 +1096,11 @@ def launch(args, run):
         kw['creationflags'] = 0x00000008 | 0x00000200      # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
     else:
         kw['start_new_session'] = True
+    tmp = os.path.join(run, 'status.json.tmp')                # written before the worker starts, so it never overwrites the worker's
+    json.dump({'state': 'starting', 'pid': None, 'updated': time.time(), 'step': 'starting'}, open(tmp, 'w'))
+    os.replace(tmp, os.path.join(run, 'status.json'))
     p = subprocess.Popen([sys.executable, os.path.abspath(__file__), *args], **kw)
-    json.dump({'state': 'starting', 'pid': p.pid, 'updated': time.time(), 'step': 'starting'}, open(os.path.join(run, 'status.json'), 'w'))
+    open(os.path.join(run, 'worker.pid'), 'w').write(str(p.pid))
     return p
 
 def passthrough():
@@ -1006,14 +1124,62 @@ def chat():
     ch = json.load(open(cf)) if os.path.exists(cf) else {}
     if ch.get('last_ts') == ts and ch.get('last_out'):
         print(ch['last_out']); return                       # the same message again: same answer, nothing re-run
-    out = chat_reply(ch, msg.strip())
+    out = chat_reply(ch, msg)                   # exactly as typed; only command words are compared stripped
     ch.update(last_ts=ts, last_out=out)
     json.dump(ch, open(cf, 'w'))
     print(out)
 
+def active_run(exclude=None):
+    """(run folder, status) of a run in this working tree that is working or waiting for a reply, else (None, None)."""
+    d = runs_dir()
+    if not os.path.isdir(d): return None, None
+    for r in sorted(os.listdir(d), reverse=True):
+        run = os.path.join(d, r)
+        if not os.path.isdir(run) or (exclude and os.path.realpath(run) == os.path.realpath(exclude)): continue
+        st = run_status(run)
+        if st['state'] in ('running', 'starting', 'paused'): return run, st
+    return None, None
+
+class start_lock:
+    """Held while a run is checked for and started, so two chats pasting at the same moment cannot both start."""
+    def __enter__(self):
+        os.makedirs(runs_dir(), exist_ok=True); self.p = os.path.join(runs_dir(), 'start.lock')
+        for _ in range(100):
+            try: self.fd = os.open(self.p, os.O_CREAT | os.O_EXCL | os.O_WRONLY); return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.p) > 30: os.remove(self.p); continue   # left by a crash
+                except OSError: pass
+                time.sleep(0.1)
+        raise SystemExit('Another story is being started in this repository; try again in a few seconds.')
+    def __exit__(self, *exc):
+        os.close(self.fd)
+        try: os.remove(self.p)
+        except OSError: pass
+
+def abandon(run, st):
+    """End a run that is waiting for a reply so a new story can start; it stays resumable, nothing is reverted."""
+    with open(os.path.join(run, 'journal.jsonl'), 'a') as f:
+        f.write(json.dumps({'type': 'end', 'result': 'Set aside for a new story in the same repository', 'resumable': True, 'by_reply': False}) + '\n')
+    st.update(state='ended', result='Set aside for a new story in the same repository', resumable=True, updated=time.time())
+    json.dump(st, open(os.path.join(run, 'status.json'), 'w'))
+
 def chat_start(ch, msg, word):
     """Start a story from a pasted message: criteria numbered as AC1:, AC2:, ... first if they are not."""
+    try:
+        with start_lock(): return _chat_start(ch, msg, word)
+    except SystemExit as e: return str(e)
+
+def _chat_start(ch, msg, word):
     global S
+    held = ch.pop('held', None)
+    if held and word in ('set aside', 'set it aside', 'abandon'):
+        other, st = active_run()
+        if other and st['state'] != 'paused':
+            ch['held'] = held
+            return f'The other story is still working ({describe(other, st)}). Send `stop` in its chat first, or wait for its next stop.'
+        if other: abandon(other, st)
+        msg, word = held, ''
     pending = ch.pop('pending', None)
     if pending and word in ('go', 'yes', 'y', 'ok', 'start'):
         story, crit, sure = pending, parse_criteria(pending), True
@@ -1023,6 +1189,14 @@ def chat_start(ch, msg, word):
         return ('I could not find acceptance criteria in your message. Paste the whole story from Jira, with its '
                 '"Acceptance criteria" heading and the criteria below it (or lines starting "AC1:", "AC2:", ...). '
                 'Other messages: `status`, `resume`, `stats`, `report`, `help`.')
+    other, ost = active_run()
+    if other:
+        ch['held'] = msg
+        what = 'is still working' if ost['state'] != 'paused' else f"is waiting for a reply at {ost.get('where', 'a stop')}"
+        return (f'Another story in this repository {what} (run {os.path.basename(other)}). Two stories in one working tree '
+                'would mix their changes and reviews. Finish or stop that one in its chat, then paste this story again; or reply '
+                '`set aside` to end the waiting one (it stays resumable, nothing is reverted) and start this one. '
+                'For two stories at once, use a second worktree (git worktree add).')
     shown = '```text\n' + crit + '\n```'
     if not sure:
         ch['pending'] = story
@@ -1042,7 +1216,7 @@ def chat_start(ch, msg, word):
 
 def chat_reply(ch, msg):
     global S
-    word = msg.lower().rstrip('.!')
+    word = msg.strip().lower().rstrip('.!')
     if word == 'help': return CHAT_HELP
     if word == 'stats':
         import io, contextlib
@@ -1061,6 +1235,8 @@ def chat_reply(ch, msg):
         if word in ('resume', 'continue'):
             try: run = resolve_run('last')
             except SystemExit as e: return str(e)
+            other, ost = active_run(exclude=run)
+            if other: return f'Another story in this repository is {ost["state"]} (run {os.path.basename(other)}); finish or stop it first.'
             ch['run'] = run; msg = word = 'resume'
         else:
             return chat_start(ch, msg, word)
@@ -1068,14 +1244,15 @@ def chat_reply(ch, msg):
     if word == 'status': return describe(run, st)
     if st['state'] in ('running', 'starting'):
         if word == 'stop':
+            if not st.get('pid'): return 'It is just starting; send `stop` again in a few seconds.'
             try:
                 if os.name == 'nt': os.kill(int(st['pid']), signal.CTRL_BREAK_EVENT)
                 else: os.kill(int(st['pid']), signal.SIGINT)
-            except OSError: pass
+            except (OSError, ValueError, TypeError): pass
             return 'Stopping. Everything so far is saved; reply `resume` later to continue.'
         return describe(run, st) + ' Your message was not used: send it again when the stop opens.'
     if st['state'] == 'paused':
-        rf = os.path.join(run, f'chat-reply-{int(time.time() * 1000)}.txt'); open(rf, 'w').write(msg)
+        rf = os.path.join(run, f'chat-reply-{int(time.time() * 1000)}.txt'); open(rf, 'w', encoding='utf-8', newline='').write(msg)
         launch(['--resume', run, '--step', '--reply-file', rf, *passthrough()], run)
         return 'Got it. Continuing; the next stop opens in an editor tab. Send `status` any time.'
     if st['state'] in ('interrupted', 'ended') and word not in ('resume', 'continue', 'go', 'retry') and number_criteria(msg)[1]:
@@ -1083,6 +1260,8 @@ def chat_reply(ch, msg):
     if st['state'] == 'interrupted' or (st['state'] == 'ended' and st.get('resumable')):
         if word not in ('resume', 'continue', 'go', 'retry'):
             return describe(run, st)
+        other, ost = active_run(exclude=run)
+        if other: return f'Another story in this repository is {ost["state"]} (run {os.path.basename(other)}); finish or stop it first.'
         launch(['--resume', run, '--step', *passthrough()], run)
         return 'Resuming from the last finished step; the next stop opens in an editor tab. Send `status` any time.'
     return describe(run, st)
@@ -1110,7 +1289,7 @@ def main(argv=None):
     ap.add_argument('--fake', help='test mode: play back <agent>-<k>.md files from this folder instead of calling copilot')
     a = ap.parse_args(argv)
     ROOT = os.getcwd()
-    reply_text = open(a.reply_file).read().strip() if a.reply_file else None
+    reply_text = open(a.reply_file, encoding='utf-8', newline='').read() if a.reply_file else None     # exactly as typed
     if a.hook_prompt: return hook_prompt()
     if a.hook_guard: return hook_guard()
     fake_count, trace, answers, step, usage = {}, [], [], 0, {}
@@ -1121,6 +1300,9 @@ def main(argv=None):
     if a.report: return report(resolve_run(a.report))
     if a.resume:
         S = resolve_run(a.resume)
+        if not a.step:                          # the chat checks this itself before it resumes a run
+            other, ost = active_run(exclude=S)
+            if other: sys.exit(f'Another story in this repository is {ost["state"]} ({other}); finish or stop it first.')
         meta = json.load(open(os.path.join(S, 'meta.json')))
         replay, interrupted = prepare_resume(S)
         prev_seconds = sum(e['seconds'] for e in replay if e['type'] == 'session')
@@ -1136,8 +1318,10 @@ def main(argv=None):
         if not a.story: ap.error('a story file is needed (or --resume, --report, --stats)')
         INV, IMP, REV = a.agents.split(',')
         story = open(a.story).read().strip()
-        if not parse_criteria(story):
+        if not parse_criteria(story) or criteria_problem(story):
+            why = criteria_problem(story)
             story, crit, _ = number_criteria(story)
+            if why and crit: print(f'[story-ctl] {why}, so the criteria were numbered again; check them:', file=sys.stderr)
             if not crit:
                 sys.exit('No acceptance criteria found in the story file: put them under an "Acceptance criteria" line, or start each with "AC1:", "AC2:", ...')
             story = story.strip()
@@ -1153,7 +1337,16 @@ def main(argv=None):
                 'story_name': os.path.basename(a.story), 'base_desc': base_desc, 'agents': [INV, IMP, REV],
                 'explain_agent': a.explain_agent, 'cap': a.cap, 'resumed': 0}
         json.dump(meta, open(os.path.join(S, 'meta.json'), 'w'))
-        set_status('starting', step='starting')
+        if not a.step:                          # the chat checks this itself, under the same lock, before it starts a run
+            with start_lock():
+                other, ost = active_run(exclude=S)
+                if other:
+                    shutil.rmtree(S, ignore_errors=True)
+                    sys.exit(f'Another story in this repository is {ost["state"]} ({other}). Finish or stop it first, '
+                             'or use a second worktree (git worktree add) for a second story.')
+                set_status('starting', step='starting')
+        else:
+            set_status('starting', step='starting')
         open_in_editor(os.path.join(S, 'progress.md'))
     criteria = parse_criteria(story)
     if not criteria:
@@ -1183,12 +1376,15 @@ def workflow(story, criteria, base_desc, INV, IMP, REV):
         hq = field(handoff, 'Questions for the analyst')
         r = ask(handoff + '\n\nReply go to implement, answer the questions above (implement and review will use your answers), '
                 'start your reply with "Change the plan:" to have investigate plan again, or reply stop.', 1 if not answers else len(answers) + 1, 'the handoff', hq)
-        while is_question(r):
+        while is_question(r) and not re.match(r'\s*change the plan\b', r, re.I):
             handoff_note = answer_question(r, handoff, 'plan')
             answers_q.append((r, handoff_note))
             r = ask('Answer to your question:\n\n' + handoff_note + '\n\n---\n\n' + handoff + '\n\nReply go to implement, answer the questions above, start your reply with "Change the plan:", or reply stop.', f'h{len(answers_q)}', 'the handoff', hq)
         if re.match(r'\s*change the plan\b', r, re.I):
-            handoff, _ = run_agent(INV, f'Story mode\n\n{story}\n\nPrevious handoff:\n{handoff}\n\nChanges from the user (verbatim):\n{r}', 'reinvestigate', True)
+            answers.append(('Plan change at the handoff', r))     # kept for every later task, and for later replans
+            handoff, _ = run_agent(INV, f'Story mode\n\n{story}\n\nPrevious handoff:\n{handoff}\n\nChanges and answers from the user so far '
+                                   f'(verbatim, oldest first; all of them still apply unless a later one replaces it):\n'
+                                   + answers_block().split(':\n', 1)[1], 'reinvestigate', True)
             cur['handoff'] = handoff
             continue
         if not is_go(r):
@@ -1216,7 +1412,7 @@ def workflow(story, criteria, base_desc, INV, IMP, REV):
         inv_block = '' if (not inv or re.match(r'^(none|n/a)\b', inv, re.I)) else '\n\nBehavioural invariants from the handoff (verbatim):\n' + inv
         rev, _ = run_agent(REV, rev_task + impl + answers_block() + inv_block, f'review-r{n}', True)
         cur['rev'] = rev
-        v, bad = verdict_check(rev)
+        v, bad = verdict_check(rev, sum(1 for l in criteria.splitlines() if AC_RE.match(l)))
         cur['verdicts'].append(verdict_line(rev).replace('- **Verdict:** ', '') if v else f'invalid ({bad})')
         if v is None:
             stop_with(f'Stopped — the round {n} review report has no valid verdict ({bad}), so no further edits were made; see the last review')

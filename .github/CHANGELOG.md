@@ -15,6 +15,50 @@ Every change was tested before and after with headless Copilot CLI runs on publi
 
 ## 2026-11-28
 
+- **Workflow controller v1.8: fixes from an outside review of v1.7, and from an independent review of these fixes.** Code only; no agent changes.
+  - **Criteria (#1, #10 in the outside review):**
+    - AC labels in two styles (`AC1:` and `AC 2 -`) or a repeated number used to drop criteria silently; now they are numbered again and you confirm them. In the terminal, the renumbered list is printed.
+    - Markdown table separator rows (`|---|`) are skipped, and escaped `\|` pipes are kept.
+    - A Markdown heading of the same level, such as `## Security requirements`, ends the AC section.
+    - Bullets found after other text with no "Acceptance criteria" heading are shown for confirmation.
+    - A new test checks that no word of the paste is lost in any sample.
+  - **Verdicts (#12):** Approve is rejected when it says fewer criteria are met than it lists ("2 of 3"), or when it lists fewer criteria than the story has. `~~~` fences are ignored like backtick fences. Of 553 distinct verdict lines from earlier runs, including 257 approvals, none is newly rejected.
+  - **Failed agents (#2):** a read-only agent (investigate, review, explain) whose process exits with an error has its report set aside and runs once more; if it fails again, the run stops. A failed review can no longer approve, and a failed investigate is no longer shown as a plan.
+  - **Live view (#16):** an unexpected event in the Copilot session log could stop the running agent; now it is skipped. The page also updates when a command finishes or the model changes, not only on new actions.
+  - **Journal (#14):** a last line cut off by a kill is dropped on resume, a damaged line elsewhere stops with a message, and the journal is rewritten atomically.
+  - **Plan changes (#9):** every "Change the plan:" reply reaches implement, review and later replans verbatim; before, only investigate saw them.
+  - **One story per working tree (#3):** a second story, or a resume, is refused while another story in the same working tree is working or waiting. In chat, `set aside` ends the waiting one (resumable) and starts the new one.
+  - **Changes while paused (#6):** a chat reply is not used when the branch or commit changed since the stop opened; the stop opens again with a note.
+  - **Relay guard (#7):** only the installed `~/.story-ctl/story-ctl.py` (or `$STORY_CTL_HOME`) may run, not another file of that name. `~` and `$HOME` are honoured only where a shell would expand them.
+  - **Smaller fixes (#5, #15, #17, #21):**
+    - the status is written before the worker starts;
+    - chat replies are passed on exactly as typed;
+    - a step that exited with an error is shown ⚠, not ✓;
+    - notifications come after the state is saved; `STORY_CTL_NOTIFY=private` hides the story title, and configured commands are split like a shell would.
+  - **Independent review:** a fresh Claude Opus 5.5 session reviewed the diff and found 5 bugs, all fixed, each with a test:
+    - a quoted `~` got past the guard;
+    - resuming a set-aside run crashed or redid finished work;
+    - `stop` during startup crashed the chat;
+    - terminal runs skipped the label fix;
+    - resume was not guarded by the one-story rule.
+  - **Different-model review:** the repository's own **review** agent on GPT-6.1 Sol then reviewed the result. It found 7 more problems, all fixed, each with a test:
+    - `AC1:` followed by `AC2 -` (no space) still dropped AC2;
+    - repeated `AC 1 -` labels were renumbered without asking;
+    - an empty table cell dropped its column name;
+    - a damaged journal line could stop a running agent through the progress page;
+    - "Change the plan: …?" was taken as a question and lost;
+    - two chats starting at the same moment could both start (now a start lock);
+    - on macOS and Linux the guard accepted a backslash path, or the Windows `$env:` form, which bash would resolve to a different file;
+    - a reply's `\r\n` line endings were changed.
+
+    It also asked for tests of a commit on the same branch and of the notification coming after the saved state; both were added. It cost 29 credits, and the working tree was unchanged afterwards.
+  - **Not done, by choice:**
+    - a strict approval mode (answers count as `go`, by design);
+    - failing closed without a session id, until it is tested in VS Code;
+    - an Outcome field for implement, until there is evidence;
+    - budgets, timeouts, distinct exit codes and a refactor into modules, for later.
+  - **Tests:** 20 new offline tests (84 in all). A test that the journal rewrite survives a crash part-way through was not added.
+
 - **Workflow controller v1.7: the progress page shows the model and reasoning effort of each step.** Code only; no agent changes.
   - **Where:** while a step runs, and for each finished step, the page shows the model and reasoning effort it is running or ran on, for example "implement round 1 · GPT-6.1 Sol, effort medium". `status` in the chat shows the same.
   - **Fallback:** when a step switches to its fallback model, both are shown, for example "GPT-6.1 Sol → GPT-6 Luna".

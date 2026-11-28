@@ -259,6 +259,76 @@ class Flow(unittest.TestCase):
         self.assertNotIn('write', sc.WRITE_DENY)
 
     # --- fix 5: exit codes and no retry over partial edits ---
+    def test_terminal_story_with_mixed_labels(self):
+        open(os.path.join(self.t, 'story.txt'), 'w').write('Story\nAC1: a\nAC1: b\nAC 3 - c\n')
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=review('Approve — 3 of 3 criteria met; blockers: 0.'))
+        self.run_ctl(['go'])
+        self.assertIn('numbered again', self.out)
+        self.assertIn('AC1: a\nAC2: b\nAC3: c', self.prompts('review')[0])
+
+    def test_approve_counting_too_few_criteria(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=review('Approve — 1 of 1 criteria met; blockers: 0.'))
+        self.run_ctl(['go'])
+        self.assertIn('no valid verdict (Approve counting 1 criteria, but the story has 2)', self.final)
+
+    def test_failed_review_never_approves(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE, review_1_exit='1', review_2=APPROVE)
+        self.assertEqual(self.run_ctl(['go']), ['investigate', 'implement', 'review', 'review'])
+        self.assertIn('review exited with code 1, so its report is not used', self.out)
+        self.assertIn('Result:** Approved', self.final)
+        self.agents(review_2_exit='1'); shutil.rmtree(self.state)
+        self.assertEqual(self.run_ctl(['go']), ['investigate', 'implement', 'review', 'review'])
+        self.assertIn('review step failed twice', self.final); self.assertNotIn('Result:** Approved', self.final)
+
+    def test_failed_investigate_is_not_a_plan(self):
+        self.agents(investigate_1=HANDOFF, investigate_1_exit='2', investigate_2=HANDOFF, investigate_2_exit='2')
+        self.assertEqual(self.run_ctl(['go']), ['investigate', 'investigate'])
+        self.assertIn('investigate step failed twice', self.final)
+        self.assertFalse(any(x[0] == 'reply' and 'Reply go to implement' in x[1] for x in self.trace))
+
+    def test_plan_change_ending_in_a_question_mark(self):
+        self.agents(investigate_1=HANDOFF, investigate_2=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.assertEqual(self.run_ctl(['Change the plan: use Redis?', 'go']), ['investigate', 'investigate', 'implement', 'review'])
+        self.assertIn('Change the plan: use Redis?', self.prompts('implement')[0])
+
+    def test_damaged_journal_while_running_does_not_stop_the_agent(self):
+        sh = 'printf "{broken\\n" >> "$STATE/journal.jsonl"; printf "{\\"type\\": \\"session\\", \\"seconds\\": 0}\\n" >> "$STATE/journal.jsonl"'
+        self.env['STATE'] = self.state
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, implement_1_sh=sh, implement_1_events=IMPL_EVENTS, review_1=APPROVE)
+        self.run_ctl(['go'])
+        self.assertIn('Result:** Approved', self.final)
+
+    def test_plan_changes_reach_every_later_task(self):
+        self.agents(investigate_1=HANDOFF, investigate_2=HANDOFF, investigate_3=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.run_ctl(['Change the plan: store it in Redis', 'Change the plan: and expire after 1 hour', 'go'])
+        inv3 = self.prompts('investigate')[2]
+        self.assertIn('Change the plan: store it in Redis', inv3); self.assertIn('Change the plan: and expire after 1 hour', inv3)
+        for agent in ('implement', 'review'):
+            self.assertIn('Change the plan: store it in Redis', self.prompts(agent)[0])
+            self.assertIn('Change the plan: and expire after 1 hour', self.prompts(agent)[0])
+
+    def test_progress_marks_a_failed_step(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, implement_1_exit='1', review_1=APPROVE)
+        self.run_ctl(['go', 'stop'])
+        prog = open(os.path.join(self.state, 'progress.md')).read()
+        self.assertIn('⚠ exit code 1: implement round 1', prog); self.assertNotIn('✓ implement', prog)
+
+    def test_resume_with_a_cut_off_journal_line(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.run_ctl(['stop'])
+        open(os.path.join(self.state, 'journal.jsonl'), 'a').write('{"type": "start", "age')
+        self.assertEqual(self.resume(['go']), ['investigate', 'implement', 'review'])
+        self.assertIn('Approved', self.final)
+        lines = open(os.path.join(self.state, 'journal.jsonl')).read().splitlines()
+        lines.insert(1, '{broken'); open(os.path.join(self.state, 'journal.jsonl'), 'w').write('\n'.join(lines) + '\n')
+        self.resume(['go']); self.assertIn('damaged at line 2', self.out)
+
+    def test_odd_session_events_do_not_stop_the_agent(self):
+        odd = '[1, 2]\n{"type": "tool.execution_start", "data": ["x"]}\n{"type": "tool.execution_start", "data": {"toolName": "bash", "arguments": 5}}\n' + IMPL_EVENTS
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, implement_1_events=odd, review_1=APPROVE)
+        self.run_ctl(['go'])
+        self.assertIn('Result:** Approved', self.final)
+
     def test_implement_nonzero_exit_is_incomplete(self):
         self.agents(investigate_1=HANDOFF, implement_1=IMPL, implement_1_exit='1', review_1=APPROVE)
         seq = self.run_ctl(['go', 'stop'])
@@ -545,7 +615,7 @@ class Chat(unittest.TestCase):
 
     def prompt(self, label, sid='sid-1'):
         d = self.run_dir(sid)
-        return open(os.path.join(d, next(f for f in sorted(os.listdir(d)) if f.endswith(f'-{label}.prompt.md')))).read()
+        return open(os.path.join(d, next(f for f in sorted(os.listdir(d)) if f.endswith(f'-{label}.prompt.md'))), newline='').read()
 
     def test_full_story_through_chat_keeps_replies_verbatim(self):
         self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=RC_Q, implement_2=IMPL, review_2=APPROVE)
@@ -613,10 +683,72 @@ class Chat(unittest.TestCase):
     def test_new_chat_is_a_new_story(self):
         self.agents(investigate_1=HANDOFF, investigate_2=HANDOFF, implement_1=IMPL, review_1=APPROVE)
         self.chat(STORY); self.wait()
+        self.chat('go'); self.assertEqual(self.wait()['result'], 'Approved')
         self.assertIn('Started', self.chat(STORY, sid='sid-2')); self.wait('sid-2')
         self.assertNotEqual(self.run_dir('sid-1'), self.run_dir('sid-2'))
-        self.chat('go', sid='sid-1'); self.assertEqual(self.wait()['result'], 'Approved')
         self.assertEqual(self.wait('sid-2')['state'], 'paused')
+
+    def test_one_story_at_a_time_per_working_tree(self):
+        self.agents(investigate_1=HANDOFF, investigate_2=HANDOFF)
+        self.chat(STORY); self.wait(); first = self.run_dir()
+        out = self.chat(STORY, sid='sid-2')
+        self.assertIn('Another story in this repository is waiting for a reply at the handoff', out)
+        self.assertFalse(os.path.exists(os.path.join(self.home, 'chats', 'sid-2.json')) and
+                         json.load(open(os.path.join(self.home, 'chats', 'sid-2.json'))).get('run'))
+        self.assertIn('Started', self.chat('set aside', sid='sid-2')); self.wait('sid-2')
+        self.assertEqual(sc_status(first)['state'], 'ended')
+        self.assertIn('resume', self.chat('status'))                           # the set-aside run stays resumable
+        self.assertIn('Another story in this repository is paused', self.chat('resume'))   # not while the new one is active
+        self.chat('stop', sid='sid-2'); self.wait('sid-2', states=('ended',))
+        self.assertIn('Resuming', self.chat('resume'))
+        st = self.wait()
+        self.assertEqual(st['state'], 'paused'); self.assertEqual(st['where'], 'the handoff')   # back at the stop it was waiting at
+
+    def test_repository_moved_while_paused(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.chat(STORY); self.wait()
+        g = lambda *a: subprocess.run(['git', *a], cwd=self.repo, check=True, capture_output=True)
+        g('commit', '-q', '--allow-empty', '-m', 'meanwhile')
+        self.chat('go'); st = self.wait()
+        self.assertIn('moved from commit', open(st['stop_file']).read())
+        g('checkout', '-qb', 'other')
+        self.chat('go now'); st = self.wait()
+        self.assertEqual(st['state'], 'paused')
+        self.assertIn('Your reply was not used:** the branch changed from', open(st['stop_file']).read())
+        self.assertNotIn('implement', [t['agent'] for t in self.tasks()])
+        self.chat('go again'); self.assertEqual(self.wait(states=('ended',))['result'], 'Approved')
+
+    def test_stop_while_starting(self):
+        run = os.path.join(self.t, 'r'); os.makedirs(run)
+        json.dump({'state': 'starting', 'pid': None, 'updated': time.time()}, open(os.path.join(run, 'status.json'), 'w'))
+        self.assertIn('just starting', sc_chat_reply(self, run, 'stop'))
+
+    def test_two_chats_start_at_the_same_moment(self):
+        self.agents(investigate_1=HANDOFF, investigate_2=HANDOFF)
+        self.hook(STORY, 'sid-a'); self.hook(STORY, 'sid-b')
+        env = lambda sid: dict(self.env, COPILOT_AGENT_SESSION_ID=sid)
+        ps = [subprocess.Popen([sys.executable, CTL, '--chat', '--fake', self.fake, '--no-open'], cwd=self.repo, env=env(x),
+                               stdout=subprocess.PIPE, text=True) for x in ('sid-a', 'sid-b')]
+        outs = [p.communicate(timeout=60)[0] for p in ps]
+        self.assertEqual(sum('Started' in o for o in outs), 1, outs)
+        self.assertEqual(sum('Another story' in o for o in outs), 1, outs)
+
+    def test_notification_comes_after_the_saved_state(self):
+        rec = os.path.join(self.t, 'rec.py'); out = os.path.join(self.t, 'seen')
+        open(rec, 'w').write('import glob, json, os, sys\n'
+                             f'st = [json.load(open(f))["state"] for f in glob.glob({self.repo!r} + "/.git/story-ctl/*/status.json")]\n'
+                             f'open({out!r}, "a").write(",".join(st) + "\\n")\n')
+        self.env.update(STORY_CTL_NOTIFY='1', STORY_CTL_NOTIFY_CMD=f'{sys.executable} {rec}')
+        self.agents(investigate_1=HANDOFF)
+        self.chat(STORY); self.wait()
+        self.assertEqual(open(out).read().split(), ['paused'])
+
+    def test_reply_kept_exactly_as_typed(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
+        self.chat(STORY); self.wait()
+        reply = '  Q1: use this:\r\n      if (x) {\n          y();\n      }\n'
+        self.chat(reply); self.wait(states=('ended',))
+        self.assertIn(reply, self.prompt('implement-r1'))
 
     def test_stop_at_a_stop_then_resume_in_a_new_chat(self):
         self.agents(investigate_1=HANDOFF, implement_1=IMPL, review_1=APPROVE)
@@ -688,14 +820,21 @@ class Chat(unittest.TestCase):
         return json.loads(p.stdout).get('permissionDecision', 'allow')
 
     def test_guard(self):
-        ok = ['python3 ~/.story-ctl/story-ctl.py --chat', 'python3 -I "/Users/x y/.story-ctl/story-ctl.py" --chat',
-              'py "$env:USERPROFILE\\.story-ctl\\story-ctl.py" --chat', 'python3 ~/.story-ctl/story-ctl.py --chat 2>&1',
+        ok = ['python3 ~/.story-ctl/story-ctl.py --chat', f'python3 -I "{self.uhome}/.story-ctl/story-ctl.py" --chat',
+'python3 ~/.story-ctl/story-ctl.py --chat 2>&1',
               'cd /repo && python3 ~/.story-ctl/story-ctl.py --chat']
         for c in ok:
             self.assertEqual(self.guard('bash', {'command': c}), 'allow', c)
+        win = 'py "$env:USERPROFILE\\.story-ctl\\story-ctl.py" --chat'      # bash would run ":USERPROFILE\..." from the repository
+        self.assertEqual(self.guard('bash', {'command': win}), 'allow' if os.name == 'nt' else 'deny')
         bad = ['python3 ~/.story-ctl/story-ctl.py --chat; rm -rf src', 'python3 ~/.story-ctl/story-ctl.py --chat && git push',
                'cat src/Foo.java', 'python3 ~/.story-ctl/story-ctl.py story.txt', 'python3 evil.py --chat',
-               'python3 ~/.story-ctl/story-ctl.py --chat | tee x']
+               'python3 ~/.story-ctl/story-ctl.py --chat | tee x', 'python3 ./story-ctl.py --chat',
+               'python3 /tmp/x/.story-ctl/story-ctl.py --chat', 'python3 ~/.story-ctl/../x/story-ctl.py --chat',
+               'python3 "~/.story-ctl/story-ctl.py" --chat', "python3 '~/.story-ctl/story-ctl.py' --chat",
+               "python3 '$HOME/.story-ctl/story-ctl.py' --chat", 'python3 ~x/.story-ctl/story-ctl.py --chat',
+               'python3 "$HOME/.story-ctl\\story-ctl.py" --chat']
+        self.assertEqual(self.guard('bash', {'command': 'python3 $HOME/.story-ctl/story-ctl.py --chat'}), 'allow')
         for c in bad:
             self.assertEqual(self.guard('bash', {'command': c}), 'deny', c)
         self.assertEqual(self.guard('edit', {'path': 'a', 'new_str': 'b'}), 'deny')
@@ -711,6 +850,17 @@ class Chat(unittest.TestCase):
         e = json.load(open(os.path.join(self.home, 'inbox', 'a_b.json')))
         self.assertEqual(e['prompt'], m)
 
+def sc_chat_reply(test, run, msg):
+    """chat_reply on a hand-made run folder, inside the test repository."""
+    old = os.getcwd(); os.chdir(test.repo)
+    try:
+        sc.ROOT = test.repo; sc.a = sc.argparse.Namespace(fake=None, no_open=True, log=None, no_log=True, base='HEAD')
+        return sc.chat_reply({'run': run}, msg)
+    finally: os.chdir(old)
+
+def sc_status(run):
+    return json.load(open(os.path.join(run, 'status.json')))
+
 def sc_alive(pid):
     if not pid: return False
     try: os.kill(int(pid), 0); return True
@@ -719,6 +869,53 @@ def sc_alive(pid):
 
 @unittest.skipIf(sc is None, 'controller not importable')
 class Helpers(unittest.TestCase):
+    def test_number_criteria_edge_cases(self):
+        n = lambda t: sc.number_criteria(t)
+        self.assertEqual(n('Story\nAC1: shows 10\nAC 2 - returns 404\n')[1:], ('AC1: shows 10\nAC2: returns 404', False))
+        self.assertEqual(n('AC1: a\nAC1: b\n')[1:], ('AC1: a\nAC2: b', False))
+        self.assertEqual(n('- AC1: a\n- AC2: b\n')[1:], ('- AC1: a\n- AC2: b', True))          # consistent ACs: unchanged
+        self.assertEqual(n('## Acceptance criteria\n| Case | Expected |\n|---|:--:|\n| unknown id | 404 |\n| a \\| b | c |\n')[1],
+                         'AC1: Case: unknown id; Expected: 404\nAC2: Case: a | b; Expected: c')
+        new, crit, _ = n('## Acceptance criteria\n- shows 10\n## Security requirements\n- encrypt at rest\n')
+        self.assertEqual(crit, 'AC1: shows 10'); self.assertIn('## Security requirements\n- encrypt at rest', new)
+        self.assertFalse(n('Background\n- the old page is slow\n- users complain\n')[2])
+        self.assertTrue(n('- shows 10\n- 404\n')[2]); self.assertTrue(n('Story\nAC 1 - x\nAC 2 - y')[2])
+        self.assertEqual(n('AC1: first\nAC2 - second\n')[1:], ('AC1: first\nAC2: second', False))
+        self.assertEqual(n('AC 1 - first\nAC 1 - second\n')[1:], ('AC1: first\nAC2: second', False))
+        self.assertEqual(n('Acceptance Criteria\n| Case | Expected |\n| unknown | |\n| known | 200 |\n')[1],
+                         'AC1: Case: unknown; Expected: (empty)\nAC2: Case: known; Expected: 200')
+
+    def test_number_criteria_loses_no_text(self):
+        """Every word of every line of the paste is still in the numbered story (bullets, labels and table
+        pipes aside)."""
+        import re as _re
+        samples = [JIRA, 'Acceptance Criteria\nThe user can:\nsee the list\nget a 404\n\nNotes\nx', 'Acceptance criteria:\n# a b\n# c d\n## e f',
+                   '\u2022 shows 10\n\u2022 404 for unknown', '## Acceptance criteria\n1. shows 10\n2. 404\n   - empty body\n## Definition of Done\n- tests',
+                   'Story\nAC 1 - shows 10\nAC-2: 404', 'Acceptance Criteria\nScenario: a\nGiven x\nWhen y\nThen z', 'Given x\nWhen y\nThen z\nGiven p\nThen q',
+                   'Acceptance Criteria\nGiven\tWhen\tThen\nx\ty\tz', 'Acceptance Criteria\n||Case||Expected||\n|unknown id|404|',
+                   'Story\nAC1: shows 10\nAC 2 - returns 404\n', 'Background\n- the old page is slow\n- users complain\n',
+                   '## Acceptance criteria\n- shows 10\n## Security requirements\n- encrypt at rest\n']
+        for t in samples:
+            new = sc.number_criteria(t)[0]
+            words = lambda x: set(_re.findall(r'[A-Za-z0-9]{2,}', x)) - {'AC', 'Acceptance', 'criteria', 'Criteria'}
+            self.assertEqual(words(t) - words(new), set(), t)
+
+    def test_verdict_counts_and_fences(self):
+        self.assertEqual(sc.verdict_check('- **Verdict:** Approve — 2 of 3 criteria met; blockers: 0.')[0], None)
+        self.assertEqual(sc.verdict_check('- **Verdict:** Approve — 3 of 3 criteria met; blockers: 0.')[0], 'Approve')
+        self.assertEqual(sc.verdict_check('~~~\n- **Verdict:** Approve\n~~~\n- **Verdict:** Request changes — 1 of 2 criteria met; blockers: 1.')[0], 'Request changes')
+
+    def test_notify_private(self):
+        d = tempfile.mkdtemp(); rec = os.path.join(d, 'rec.py'); out = os.path.join(d, 'out')
+        open(rec, 'w').write(f'import sys\nopen({out!r}, "a").write(sys.argv[1] + "\\n")\n')
+        old = dict(os.environ)
+        try:
+            os.environ.update(STORY_CTL_NOTIFY='private', STORY_CTL_NOTIFY_CMD=f'"{sys.executable}" "{rec}"')
+            sc.S = d; sc.notify('x')
+            self.assertEqual(open(out).read(), 'Story\n')
+        finally:
+            os.environ.clear(); os.environ.update(old); shutil.rmtree(d)
+
     def test_activity_reads_a_growing_log(self):
         d = tempfile.mkdtemp(); p = os.path.join(d, 'events.jsonl')
         lines = IMPL_EVENTS.splitlines(True)
