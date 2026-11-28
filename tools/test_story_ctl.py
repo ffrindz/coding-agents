@@ -33,6 +33,20 @@ HANDOFF = textwrap.dedent('''\
     - **Summary:** story — add a thing
     - **Questions for the analyst (story only):** Q1 should the thing be sorted? — **If unanswered:** keep today's order
     - **Plan (story only):** 1. add it''')
+def events(*evs):
+    return '\n'.join(json.dumps(e) for e in evs) + '\n'
+def tool(i, name, args): return {'type': 'tool.execution_start', 'data': {'toolCallId': i, 'toolName': name, 'arguments': args}}
+def done(i, code=None, ok=True):
+    d = {'toolCallId': i, 'success': ok}
+    if code is not None: d['shellExecution'] = {'exitCode': code}
+    return {'type': 'tool.execution_complete', 'data': d}
+IMPL_EVENTS = events(
+    {'type': 'assistant.message', 'data': {'content': 'Checking the controller first.', 'toolRequests': [{}]}},
+    tool('1', 'view', {'path': '/repo/Foo.java'}), done('1'), tool('2', 'view', {'path': 'Bar.java'}), done('2'),
+    tool('3', 'report_intent', {'intent': 'x'}),
+    tool('4', 'apply_patch', '*** Begin Patch\n*** Update File: Foo.java\n@@\n-a\n+b\n*** Add File: FooTest.java\n+x\n*** End Patch'),
+    done('4'), tool('5', 'bash', {'command': './mvnw test -Dtest=FooTest\necho more'}), done('5', 1),
+    tool('6', 'bash', {'command': './mvnw test -Dtest=FooTest'}), done('6', 0))
 IMPL = '# Report (implement v3.16)\n- **Changed:** Foo.java\n- **Tests:** targeted: ok; full: ok'
 
 def review(verdict, questions='none', edit='none', extra=''):
@@ -271,6 +285,21 @@ class Flow(unittest.TestCase):
         self.assertIn('acceptance criteria numbered from the story', self.out)
         self.assertIn('AC2: An unknown account id returns 404', self.prompts('investigate')[0])
         self.assertIn('AC1: The list shows the last 10 transfers\n  - newest first\nAC2:', self.prompts('review')[0])
+
+    def test_progress_page(self):
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, implement_1_events=IMPL_EVENTS, review_1=APPROVE)
+        self.run_ctl(['Q1: yes'])
+        prog = open(os.path.join(self.state, 'progress.md')).read()
+        self.assertIn('# Story: add a thing', prog); self.assertIn('**Finished**', prog)
+        self.assertIn('AC2: an unknown id returns 404', prog)
+        for x in ('✓ investigate', '↩ your reply at the handoff: “Q1: yes”', '✓ implement round 1', '✓ review round 1', '■ Approved'):
+            self.assertIn(x, prog)
+        self.assertNotIn('doing now', prog)
+        m = __import__('re').search(r'implement round 1 .*\[activity\]\((\S+)\)', prog)
+        act = open(os.path.join(self.state, m.group(1))).read()
+        self.assertIn('read    /repo/Foo.java, Bar.java', act); self.assertIn('edit    Foo.java, FooTest.java', act)
+        self.assertIn('./mvnw test -Dtest=FooTest   ✗ exit 1', act); self.assertIn('note    Checking the controller first.', act)
+        self.assertNotIn('report_intent', act)
 
     def test_multiline_criteria_in_review_task(self):
         open(os.path.join(self.t, 'story.txt'), 'w').write(
@@ -527,11 +556,14 @@ class Chat(unittest.TestCase):
         self.chat('go'); self.assertEqual(self.wait()['result'], 'Approved')
 
     def test_message_while_running_is_not_used(self):
-        self.agents(investigate_1=HANDOFF, implement_1=IMPL, implement_1_sh='sleep 4', review_1=APPROVE)
+        self.agents(investigate_1=HANDOFF, implement_1=IMPL, implement_1_sh='sleep 4', implement_1_events=IMPL_EVENTS, review_1=APPROVE)
         self.chat(STORY); self.wait()
         self.chat('go'); time.sleep(1.5)
         out = self.chat('Q1: actually sort by date')
-        self.assertIn('Working: implement-r1', out); self.assertIn('was not used', out)
+        self.assertIn('Working: implement round 1', out); self.assertIn('was not used', out)
+        self.assertIn('./mvnw test -Dtest=FooTest   ✓', out); self.assertIn('progress.md', out)
+        prog = open(os.path.join(self.run_dir(), 'progress.md')).read()
+        self.assertIn('▶ implement round 1', prog); self.assertIn('## What implement is doing now', prog)
         self.assertEqual(self.wait()['result'], 'Approved')
         self.assertNotIn('sort by date', open(os.path.join(self.run_dir(), 'trace.json')).read())
 
@@ -664,6 +696,18 @@ def sc_alive(pid):
 
 @unittest.skipIf(sc is None, 'controller not importable')
 class Helpers(unittest.TestCase):
+    def test_activity_reads_a_growing_log(self):
+        d = tempfile.mkdtemp(); p = os.path.join(d, 'events.jsonl')
+        lines = IMPL_EVENTS.splitlines(True)
+        open(p, 'w').write(''.join(lines[:3]) + lines[3][:10])            # the last line half written
+        act = sc.Activity(p); act.read()
+        self.assertEqual(len(act.acts), 2)
+        open(p, 'w').write(IMPL_EVENTS); act.read()
+        self.assertEqual([x[0] for x in act.acts], ['note', 'read', 'read', 'edit', 'run', 'run'])
+        self.assertEqual(act.acts[4][2], '✗ exit 1'); self.assertEqual(act.acts[5][2], '✓')
+        self.assertEqual(sc.Activity(os.path.join(d, 'none')).read(), [])
+        shutil.rmtree(d)
+
     def test_number_criteria_formats(self):
         n = lambda t: sc.number_criteria(t)[1]
         self.assertEqual(n(JIRA), 'AC1: The list shows the last 10 transfers\n  - newest first\nAC2: An unknown account id returns 404')

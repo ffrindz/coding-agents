@@ -15,6 +15,19 @@ Every change was tested before and after with headless Copilot CLI runs on publi
 
 ## 2026-11-28
 
+- **Workflow controller v1.5: a live view of what the agents are doing.** Code only; no agent changes.
+  - **Why:** the story agent felt like a black box. While implement worked, which can take 10–20 minutes, `status` only said which step was running.
+  - **How:** each agent now runs with a session id chosen by the controller, so the controller can read that session's Copilot log while the agent works. It keeps `progress.md` in the run folder up to date, which opens in an editor tab at the start, and VS Code reloads it by itself.
+  - **What the page shows:**
+    - the criteria;
+    - each step with its time, credits, report and a full action list (`<step>.activity.md`);
+    - your replies;
+    - the files changed in the working tree;
+    - the running agent's actions: the files it read (consecutive reads on one line), searches, commands with ✓ or ✗ and the exit code, edits, and its short progress notes.
+  - **In the chat:** `status` shows the last five actions, and the "Started" reply links the page.
+  - **Tests:** 2 new offline tests (63 in all).
+  - **Live run** (relay and investigate on GPT-6 Luna, a Jira-format story on the JHipster sample app): 29 actions were on the page after 29 seconds, updated as investigate worked. When it finished, the step showed its time, credits, report and activity links, and the stop was marked waiting. About 1.5 credits; stopped at the handoff. Implement was not run live; its edit and test-command lines were checked against the event shapes in saved implement sessions.
+
 - **story v2.1 and workflow controller v1.4: paste the story straight from Jira.** Why: the first real try failed at the first message. A story copied from Jira has no `AC1:` lines, so the controller replied with its help text and nothing started. Now the controller numbers the criteria `AC1:`, `AC2:`, ... itself, in code and without a model, and shows the numbered list in its first reply. Criteria are found under an "Acceptance criteria" heading (Jira's `h3.`, Markdown, bold, or plain text, ending at the next heading such as Notes or Definition of Done) as bullets (`*`, `-`, `•`, Jira's `#`), numbers, `AC 1 -` labels, Given/When/Then scenarios, a Jira or tab-separated table, or one per line. Nested bullets stay with their criterion. With no heading, it uses bullets, labels, Given/When/Then or a table anywhere in the paste. Plain lines with none of these are shown first and wait for `go`. The rest of the story is kept, and the paste as typed is saved next to the numbered `story.txt`. After a stop, a new paste in the same chat starts a new run. The terminal mode numbers a story file the same way. The story agent's only change is its description. Tests: 5 new offline tests (61 in all). Live with the relay (GPT-6 Luna) on a rendered Jira paste: v2.0/v1.3 answered with the help text, while v2.1/v1.4 started with AC1–AC3 and investigate's plan covered all three (0.3 credits). It was then stopped at the handoff.
 
 ## 2026-11-27

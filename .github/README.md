@@ -61,7 +61,15 @@ Use a fresh chat for each step so each agent starts from the report alone. The h
 
 1. Open the repository you are changing, start a new chat, pick **story** in the agent dropdown and paste the story as you copied it from Jira. The controller numbers the acceptance criteria `AC1:`, `AC2:`, ... itself, without a model, and shows them in its first reply. It reads criteria under an "Acceptance criteria" heading as bullets, numbers, Jira markup, Given/When/Then, a table, or one per line. If you paste only the criteria with no heading or bullets, it shows how it numbered them and waits for `go`. If the numbering is wrong, reply `stop` and paste again. Criteria already written as `AC1:` lines are used as they are.
 2. Within seconds it replies "Started". The first time, VS Code asks you to approve the `story-ctl.py --chat` command; allow it for good (for that exact command) so later messages run without a prompt.
-3. When the plan is ready it opens in an editor tab; press Cmd+Shift+V (Ctrl+Shift+V) for the preview, where code links open the files. Reply in the same chat:
+3. A live view, `progress.md`, opens in an editor tab, and the reply links it too. Press Cmd+Shift+V (Ctrl+Shift+V) for the preview; it updates by itself as the run goes. It shows:
+   - the criteria;
+   - each step with its time, credits, report and a full list of what it did;
+   - your replies;
+   - the files changed in the working tree;
+   - what the running agent is doing now: the files it reads, its searches, the commands it runs (with ✓ or ✗) and the files it edits.
+
+   `status` in the chat shows the last five of these actions.
+4. When the plan is ready it opens in an editor tab; press Cmd+Shift+V (Ctrl+Shift+V) for the preview, where code links open the files. Reply in the same chat:
 
    | At | Reply | What happens |
    |---|---|---|
@@ -70,12 +78,12 @@ Use a fresh chat for each step so each agent starts from the report alone. The h
    | a review with questions | your answers | the next round fixes the Edit items and applies your answers |
    | implement could not finish a round | `review`, or an instruction for implement | the work goes to review, or implement continues with your instruction |
    | any stop | `stop` | the run ends there and can be resumed later |
-   | any time | `status` | what is running, credits and minutes so far, or where it is waiting |
+   | any time | `status` | what is running and its last five actions, credits and minutes so far, or where it is waiting |
    | after a stop or an interruption | `resume` | continues from the last finished step (in a new chat too: it picks up the last run in this repository) |
    | any time | `stats`, `report`, `help` | your run statistics, a problem report for this run, the list of replies |
 
-4. implement and review run in the background, at most 3 rounds; a review with questions opens in a tab and waits for your reply. The run keeps going if you close the chat or switch to other work; when it ends, `status` shows the result and links the final report (open items, every handoff question with the assumption used, your answers, the last implement report and the last review).
-5. A new chat is a new story. A message sent while an agent is still working is not used (it says so); send it again when the stop opens.
+5. implement and review run in the background, at most 3 rounds; a review with questions opens in a tab and waits for your reply. The run keeps going if you close the chat or switch to other work; when it ends, `status` shows the result and links the final report (open items, every handoff question with the assumption used, your answers, the last implement report and the last review).
+6. A new chat is a new story. A message sent while an agent is still working is not used (it says so); send it again when the stop opens.
 
 How it stays reliable: the story agent never orchestrates. For every message it runs one fixed command and shows its output; your message reaches the controller through the agent's own hook (exactly as typed, never retyped by the model), and a second hook denies every other command, so the relay cannot edit files or do the work itself. Handoffs, answers, verdicts and rounds are the workflow controller's code described below. Each chat turn costs the relay about 0.1 credit; the agents cost what they cost from the terminal. If your organisation turns hooks off, the story agent replies that it could not read your message: run the story from the terminal instead.
 

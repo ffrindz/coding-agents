@@ -27,6 +27,10 @@ Everything (prompts, reports, your replies, the final report) is saved under <gi
 outside the working tree, so the agents never see it and nothing is committed.
 Options: --base <branch> for review (default HEAD; resolved to a commit at the start), --cap <credits per agent
 run> (default 300), --no-open.
+Live view: progress.md in the run folder opens in an editor tab at the start and is rewritten as the run goes: the
+criteria, each step with its time, credits and report, your replies, and what the running agent is reading,
+searching, running (with pass or fail) and editing, from its Copilot session log; `status` in the chat shows the
+last few actions. Each finished step's actions are kept in <step>.activity.md.
 Run log: each run adds one line to ~/.story-ctl/runs.jsonl (on your machine only; --log FILE, $STORY_CTL_LOG,
 or --no-log); --stats summarises it (outcomes, rounds, credits per agent, minutes). Credits and time so far are
 shown at every stop and in the final report.
@@ -37,12 +41,13 @@ runs again over its partial edits.
 --report RUN writes problem-report.md for a run (criteria, each stop's questions and your reply, each round's
 verdict line), ready to neutralise and share when an agent does something wrong.
 Test options: --fake <folder> plays back canned agent replies (<agent>-<k>.md; optional <agent>-<k>.sh runs
-first in the repository, <agent>-<k>.exit the exit code, <agent>-<k>.credits the credits); --reply-cmd answers stops from a command.
+first in the repository, <agent>-<k>.exit the exit code, <agent>-<k>.credits the credits, <agent>-<k>.events a
+Copilot session log for the progress page); --reply-cmd answers stops from a command.
 Tests: python3 tools/test_story_ctl.py (no Copilot, no credits).
 """
-import argparse, difflib, hashlib, json, os, re, shutil, signal, subprocess, sys, time
+import argparse, difflib, hashlib, json, os, re, shutil, signal, subprocess, sys, time, uuid
 
-VERSION = '1.4'
+VERSION = '1.5'
 READ_ONLY_DENY = ['write', 'shell(git push)', 'shell(git commit)', 'shell(git reset)', 'shell(git checkout)',
                   'shell(git stash)', 'shell(git clean)', 'shell(git restore)']
 WRITE_DENY = ['shell(git push)']
@@ -344,7 +349,7 @@ def replay_next(kind):
 def run_agent(agent, prompt, label, read_only):
     """One fresh copilot session; returns (final message, exit code). Retries once when nothing came back,
     unless the working tree changed during the failed attempt."""
-    global step, pending
+    global step, pending, LIVE
     saved = replay_next('task')
     if saved is not None:
         if saved['agent'] != agent or saved['label'] != label or saved['phash'] != phash(prompt):
@@ -360,10 +365,11 @@ def run_agent(agent, prompt, label, read_only):
         if not re.fullmatch(r'\s*(retry|go|resume|continue)\.?\s*', r, re.I):
             stop_with(f'Stopped at the resume of an interrupted step (reply was not "retry")', resumable=True)
     pending = None
-    set_status('running', step=label, agent=agent)
     deny = READ_ONLY_DENY if read_only else WRITE_DENY
     spent, t_start = 0.0, time.monotonic()
     for attempt in (1, 2):
+        LIVE = {'label': label, 'agent': agent, 'since': time.time(), 'acts': []}
+        set_status('running', step=label, agent=agent)
         step += 1
         pf = save(f'{step:02d}-{label}.prompt.md', prompt)
         before = snapshot()
@@ -372,6 +378,8 @@ def run_agent(agent, prompt, label, read_only):
         if a.fake:
             k = fake_count[agent] = fake_count.get(agent, 0) + 1
             base = os.path.join(os.path.abspath(a.fake), f'{agent}-{k}')
+            if os.path.exists(base + '.events'):
+                LIVE['acts'] = Activity(base + '.events').read(); set_status('running', step=label, agent=agent)
             if os.path.exists(base + '.sh'):
                 subprocess.run(['sh', base + '.sh'], cwd=ROOT)
             if os.path.exists(base + '.exit'):
@@ -381,17 +389,35 @@ def run_agent(agent, prompt, label, read_only):
             final = open(base + '.md').read().strip() if os.path.exists(base + '.md') else ''
             if not final: print(f'[story-ctl] fake: no {base}.md', file=sys.stderr)
         else:
-            cmd = ['copilot', '--agent', agent, '-p', prompt, '--allow-all-tools']
+            sid = str(uuid.uuid4())
+            cmd = ['copilot', '--agent', agent, '-p', prompt, '--allow-all-tools', '--session-id', sid]
             for d in deny: cmd += ['--deny-tool', d]
             cmd += ['--max-ai-credits', str(a.cap), '--disable-client-telemetry']
-            out = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
-            code = out.returncode
-            log = out.stdout + out.stderr; save(f'{step:02d}-{label}.stdout.txt', log)
+            ev = os.path.expanduser(f'~/.copilot/session-state/{sid}/events.jsonl')
+            act = Activity(ev); LIVE['acts'] = act.acts
+            lf = os.path.join(S, f'{step:02d}-{label}.stdout.txt')
+            with open(lf, 'w') as out_f:
+                p = subprocess.Popen(cmd, stdout=out_f, stderr=subprocess.STDOUT, cwd=ROOT)
+                try:
+                    seen, tick = 0, 0
+                    while True:
+                        try: p.wait(timeout=2); break
+                        except subprocess.TimeoutExpired: pass
+                        act.read(); tick += 1
+                        if len(act.acts) != seen or tick % 10 == 0:
+                            seen = len(act.acts); set_status('running', step=label, agent=agent)
+                except BaseException:
+                    p.kill(); p.wait(); raise
+            code = p.returncode
+            log = open(lf, encoding='utf-8', errors='replace').read()
             cr = credits_in(log)
-            sid = (re.findall(r'resume=([0-9a-f-]+)', log) or [None])[-1]
-            ev = os.path.expanduser(f'~/.copilot/session-state/{sid}/events.jsonl') if sid else None
+            act.read()
+            ev = ev if os.path.exists(ev) else None
+            if not ev:
+                old_sid = (re.findall(r'resume=([0-9a-f-]+)', log) or [None])[-1]
+                ev = os.path.expanduser(f'~/.copilot/session-state/{old_sid}/events.jsonl') if old_sid else None
             if ev and os.path.exists(ev):
-                for l in open(ev):
+                for l in open(ev, encoding='utf-8', errors='replace'):
                     try: e = json.loads(l)
                     except ValueError: continue
                     d = e.get('data') or {}
@@ -404,10 +430,16 @@ def run_agent(agent, prompt, label, read_only):
         after = snapshot()
         touched = before is not None and after != before
         trace.append(['task', agent, prompt, final, tools, code])
+        actf = None
+        if LIVE and LIVE['acts']:
+            actf = f'{step:02d}-{label}.activity.md'
+            save(actf, f'# What {agent} did ({step_name(label)})\n\n```text\n' + '\n'.join(activity_lines(LIVE['acts'], short=False)) + '\n```\n')
+        LIVE = None
         if final:
             save(f'{step:02d}-{label}.result.md', final)
             jwrite({'type': 'task', 'agent': agent, 'label': label, 'phash': phash(prompt), 'result': final, 'code': code,
-                    'credits': spent, 'attempts': attempt, 'seconds': round(time.monotonic() - t_start)})
+                    'credits': spent, 'attempts': attempt, 'seconds': round(time.monotonic() - t_start),
+                    'file': f'{step:02d}-{label}.result.md', 'activity': actf})
         if read_only and touched:
             stop_with(f'Stopped — the {agent} step changed the working tree, but it must not edit. Nothing was '
                       f'reverted; check these files:\n{changed_files()}')
@@ -480,8 +512,12 @@ def open_in_editor(path):
 def set_status(state, **kw):
     st = {'state': state, 'pid': os.getpid(), 'updated': time.time(), 'credits': round(total_credits(), 1),
           'minutes': round(elapsed() / 60, 1), **kw}
+    if LIVE and state == 'running':
+        st['recent'] = activity_lines(LIVE['acts'])[-5:]; st['actions'] = len(LIVE['acts'])
     tmp = os.path.join(S, 'status.json.tmp')
     json.dump(st, open(tmp, 'w')); os.replace(tmp, os.path.join(S, 'status.json'))
+    try: write_progress(st)
+    except Exception as e: print(f'[story-ctl] progress page not updated: {e}', file=sys.stderr)
 
 def answers_block():
     if not answers: return ''
@@ -518,6 +554,138 @@ def stop_with(result, resumable=False, by_reply=False):
     set_status('ended', result=result, resumable=resumable, final=os.path.join(S, 'final.md'))
     print('\n' + final + f'\n\n[story-ctl] everything is saved in {S}; a problem report for this run: --report {S}')
     sys.exit(0)
+
+# ---------- live progress page (progress.md in the run folder) ----------
+#
+# Each agent runs with a known Copilot session id, so its session log (~/.copilot/session-state/<id>/events.jsonl,
+# written while it works) can be read as it goes: what it reads, searches, runs and edits. progress.md is rewritten
+# at every change and stays open in an editor tab, which VS Code reloads by itself.
+
+LIVE = None                 # the agent step running now: {'label', 'agent', 'since', 'acts'}
+ACT_SKIP = {'report_intent', 'think', 'update_todo', 'read_bash', 'list_bash', 'read_powershell', 'list_powershell'}
+
+def _rel(p):
+    p = str(p or '')
+    root = globals().get('ROOT') or ''
+    try: return os.path.relpath(p, root) if root and os.path.isabs(p) and p.startswith(root + os.sep) else p
+    except ValueError: return p
+
+def _short(s, n=110):
+    s = ' '.join(str(s).split())
+    return s if len(s) <= n else s[:n - 1] + '…'
+
+def describe_tool(name, args):
+    if name == 'apply_patch':
+        files = re.findall(r'^\*\*\* (?:Update|Add|Delete) File: (.+)$', args if isinstance(args, str) else json.dumps(args), re.M)
+        return ['edit', ', '.join(_rel(f.strip()) for f in files) or 'a patch', '']
+    g = args if isinstance(args, dict) else {}
+    if name in ('view', 'read', 'read_file'): return ['read', _rel(g.get('path')), '']
+    if name in ('rg', 'grep', 'search'): return ['search', _short(g.get('pattern') or g.get('query') or '', 70), '']
+    if name == 'glob': return ['find', _short(g.get('pattern', ''), 70), '']
+    if name in ('bash', 'powershell', 'shell'):
+        c = (g.get('command') or '').strip().splitlines()
+        return ['run', _short(c[0] if c else '', 90), '']
+    if name in ('edit', 'str_replace', 'str_replace_editor', 'write'): return ['edit', _rel(g.get('path')), '']
+    if name == 'create': return ['create', _rel(g.get('path')), '']
+    if name == 'skill': return ['skill', _short(g.get('skill') or g.get('name') or '', 60), '']
+    return [name, _short(json.dumps(g), 60) if g else '', '']
+
+class Activity:
+    """Reads a Copilot session log as it grows (a line still being written is kept for the next read)."""
+    def __init__(self, path):
+        self.path, self.pos, self.buf, self.acts, self.idx = path, 0, '', [], {}
+    def read(self):
+        try:
+            with open(self.path, encoding='utf-8', errors='replace') as f:
+                f.seek(self.pos); data = f.read(); self.pos = f.tell()
+        except OSError:
+            return self.acts
+        lines = (self.buf + data).split('\n'); self.buf = lines.pop()
+        for l in lines:
+            try: e = json.loads(l)
+            except ValueError: continue
+            t, d = e.get('type'), e.get('data') or {}
+            if t == 'assistant.message' and d.get('toolRequests') and (d.get('content') or '').strip():
+                self.acts.append(['note', _short(d['content'], 150), ''])
+            elif t == 'tool.execution_start' and d.get('toolName') not in ACT_SKIP:
+                self.idx[d.get('toolCallId')] = len(self.acts)
+                self.acts.append(describe_tool(d.get('toolName', ''), d.get('arguments')))
+            elif t == 'tool.execution_complete' and d.get('toolCallId') in self.idx:
+                x = self.acts[self.idx.pop(d['toolCallId'])]
+                code = (d.get('shellExecution') or {}).get('exitCode')
+                if x[0] == 'run' and code is not None: x[2] = '✓' if code == 0 else f'✗ exit {code}'
+                elif d.get('success') is False: x[2] = '✗ failed'
+        return self.acts
+
+def activity_lines(acts, short=True):
+    """One line per action; consecutive reads, searches and finds are put on one line. short: file names only
+    for reads and edits (the activity file of a finished step keeps the paths)."""
+    out = []
+    for kind, what, res in acts:
+        if short and kind in ('read', 'edit', 'create'):
+            what = ', '.join(os.path.basename(x.strip()) or x for x in what.split(', '))
+        if out and kind in ('read', 'search', 'find') and out[-1][0] == kind and not out[-1][2] and not res and len(out[-1][1]) < 100:
+            out[-1][1] += ', ' + what; continue
+        out.append([kind, what, res])
+    return [f'{k:<7} {w}' + (f'   {r}' if r else '') for k, w, r in out]
+
+def step_name(label):
+    m = re.match(r'(implement|review)-r(\d)$', label)
+    if m: return f'{m.group(1)} round {m.group(2)}'
+    return {'explain-question': 'explain (your question)', 'reinvestigate': 'investigate again (your changes)'}.get(label, label)
+
+def _mins(s): return f'{s / 60:.0f} min' if s >= 60 else f'{s:.0f} s'
+
+def _cr(x): return f'{x:.1f} credits' if x < 10 else f'{x:.0f} credits'
+
+def write_progress(st):
+    try:
+        meta_ = json.load(open(os.path.join(S, 'meta.json')))
+    except (OSError, ValueError):
+        return
+    story = meta_.get('story_text', '')
+    title = next((l.strip('#* ').strip() for l in story.splitlines() if l.strip()), 'story')
+    state = st['state']
+    head = {'running': f"Working: {step_name(st.get('step', ''))}", 'starting': 'Starting',
+            'paused': f"Waiting for your reply at {st.get('where', 'a stop')}",
+            'interrupted': 'Interrupted: reply `resume` in the chat to continue', 'ended': 'Finished'}.get(state, state)
+    L = [f'# {_short(title, 90)}', '',
+         f"**{head}** · {_cr(st.get('credits', 0))} · {st.get('minutes', 0):.0f} min so far · updated {time.strftime('%H:%M:%S')}", '']
+    crit = parse_criteria(story)
+    if crit:
+        L += ['## Acceptance criteria', '', '```text', crit, '```', '']
+    L += ['## Steps', '']
+    open_start = None
+    for e in load_journal(S):
+        if e['type'] == 'start':
+            if open_start and open_start is not LIVE: L.append(f"- ✗ {step_name(open_start['label'])}: ended without a report")
+            open_start = e
+        elif e['type'] == 'task':
+            open_start = None
+            f = e.get('file')
+            L.append(f"- ✓ {step_name(e['label'])} · {_mins(e.get('seconds', 0))} · {_cr(e.get('credits', 0))}"
+                     + (f' · [report]({f})' if f else '') + (f" · [activity]({e['activity']})" if e.get('activity') else ''))
+        elif e['type'] == 'reply':
+            L.append(f"- ↩ your reply at {e['where']}: “{_short(e['text'] or '(empty)', 120)}”")
+        elif e['type'] == 'end':
+            L.append(f"- ■ {_short(e['result'], 200)} · [final report](final.md)")
+    if LIVE:
+        L.append(f"- ▶ {step_name(LIVE['label'])} · running {_mins(time.time() - LIVE['since'])}")
+    elif state == 'paused':
+        L.append(f"- ⏸ waiting for your reply at {st.get('where')} · [open the stop]({os.path.basename(st.get('stop_file', ''))})")
+    if LIVE:
+        lines = activity_lines(LIVE['acts'])
+        L += ['', f"## What {LIVE['agent']} is doing now", '',
+              f'{len(LIVE["acts"])} actions so far' + (f'; the last 25 below' if len(lines) > 25 else '') + '.', '', '```text']
+        L += lines[-25:] or ['(starting)']
+        L += ['```']
+    _, out = git('status', '--porcelain=v1', '-uall')
+    files = [l[3:] for l in out.decode(errors='replace').splitlines()]
+    L += ['', '## Files changed in the working tree', ''] + ([f'- {x}' for x in files[:40]] or ['none'])
+    if len(files) > 40: L.append(f'- … {len(files) - 40} more')
+    L += ['', f'Run folder: {S}', '']
+    tmp = os.path.join(S, 'progress.md.tmp')
+    open(tmp, 'w').write('\n'.join(L)); os.replace(tmp, os.path.join(S, 'progress.md'))
 
 # ---------- resume, report and stats ----------
 
@@ -733,8 +901,11 @@ def link(path):
 def describe(run, st):
     cr = f"{st.get('credits', 0):.0f} credits, {st.get('minutes', 0):.0f} min so far"
     if st['state'] in ('running', 'starting'):
-        step = st.get('step', 'starting')
-        return f'Working: {step} ({cr}). The next stop opens in an editor tab when it is ready; reply here then.'
+        step = step_name(st.get('step', 'starting'))
+        recent = st.get('recent') or []
+        now = ('\n\nLatest actions:\n```text\n' + '\n'.join(recent) + '\n```\n') if recent else ' '
+        return (f'Working: {step} ({cr}; {st.get("actions", 0)} actions in this step).{now}Live view: {link(os.path.join(run, "progress.md"))}. '
+                'The next stop opens in an editor tab when it is ready; reply here then.')
     if st['state'] == 'paused':
         return (f"Waiting for your reply at {st['where']} ({cr}). The stop is open in an editor tab "
                 f"({link(st['stop_file'])}); reply here with go, your answers, a question, or stop.")
@@ -807,7 +978,8 @@ def chat_start(ch, msg, word):
     ch['run'] = run
     head = 'Started.' if story.strip() == msg.strip() else f'Started with these acceptance criteria, numbered from your paste:\n\n{shown}\n\nIf they are wrong, reply `stop` and paste the story again.'
     return (head + ' Investigate is reading the code; the plan opens in an editor tab when it is ready '
-            '(usually a few minutes). Reply here then. Send `status` any time.')
+            f'(usually a few minutes). Reply here then. Live view of what the agents are doing: {link(os.path.join(run, "progress.md"))} '
+            '(it opens in a tab and updates by itself). Send `status` any time.')
 
 def chat_reply(ch, msg):
     global S
@@ -922,6 +1094,8 @@ def main(argv=None):
                 'story_name': os.path.basename(a.story), 'base_desc': base_desc, 'agents': [INV, IMP, REV],
                 'explain_agent': a.explain_agent, 'cap': a.cap, 'resumed': 0}
         json.dump(meta, open(os.path.join(S, 'meta.json'), 'w'))
+        set_status('starting', step='starting')
+        open_in_editor(os.path.join(S, 'progress.md'))
     criteria = parse_criteria(story)
     if not criteria:
         sys.exit('No acceptance criteria (lines starting "AC1:") found in the story file.')
