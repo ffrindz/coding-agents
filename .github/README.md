@@ -58,7 +58,7 @@ Use a fresh chat for each step so each agent starts from the report alone. The h
 `tools/story-ctl.py` runs investigate, implement and review for you, with you in the loop at the same points as the story agent, but the bookkeeping is code instead of a model: handoffs and reports are passed on byte for byte, all your answers go to every later task, verdicts and rounds are read and counted exactly, and it always stops after the handoff and when a review has questions. In tests it ran 30 stories with no orchestration mistake (the story agent made one in about 1 run in 6). It needs Python 3 and the Copilot CLI.
 
 1. Copy `tools/story-ctl.py` anywhere (for example next to your agent files).
-2. Save the story with its acceptance criteria (lines starting `AC1:`, `AC2:`, ...) in a text file.
+2. Save the story with its acceptance criteria (lines starting `AC1:`, `AC2:`, ...; a criterion can continue on indented or bulleted lines below it) in a text file.
 3. In VS Code's terminal, at the root of the repository you are changing: `python3 <path>/story-ctl.py story.txt --base main`
 4. At each stop it prints the agent's text and opens it in VS Code; press Cmd+Shift+V (Ctrl+Shift+V) for the Markdown preview, where code links open the files. Type your reply and finish with an empty line:
 
@@ -67,11 +67,12 @@ Use a fresh chat for each step so each agent starts from the report alone. The h
    | the handoff | `go`, your answers, or `Change the plan: ...` | as with the story agent |
    | any stop | a question ending with `?` | the explain agent answers it and you stay at the stop |
    | a review with questions | your answers | the next round fixes the Edit items and applies your answers |
-   | implement could not finish a round | `review`, `stop`, or an instruction for implement | implement continues with your instruction, or the work goes to review, or it stops |
+   | implement could not finish a round | `review`, or an instruction for implement | implement continues with your instruction, or the work goes to review |
+   | any stop | `stop`, or Ctrl-D with nothing typed | the run ends there; nothing more is changed |
 
-5. It stops early when a review asks for the same changes as the round before, and after round 3. The final report lists the open items, every handoff question with the assumption used, and all your answers, then the last implement report and the last review in full.
+5. It stops early when a review asks for the same changes as the round before, and after round 3. It also stops, with a message and without reverting anything, when a review report has no valid verdict, when investigate, review or explain changed your working tree (they run with file edits and `git commit`/`push`/`reset`/`checkout` denied, but a shell command could still write, so the controller compares the tree before and after), or when implement failed after changing files (it is not retried over partial edits). `--base` is fixed to a commit when the run starts. The final report lists the open items, every handoff question with the assumption used, and all your answers, then the last implement report and the last review in full.
 
-Everything is saved under `.git/story-ctl/<time>/` (outside the working tree, never committed), so you can reopen any step.
+Everything is saved under `.git/story-ctl/<time>/` (in a linked worktree, under that worktree's git folder; outside the working tree, never committed), so you can reopen any step. `python3 tools/test_story_ctl.py` runs the controller's own tests offline (no Copilot, no credits).
 
 ### Add a repository instructions file
 
