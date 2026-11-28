@@ -8,7 +8,11 @@ New-Item -ItemType Directory -Force -Path $ag, $sc | Out-Null
 Copy-Item -Path '*.agent.md' -Destination $ag -Force
 Write-Host "agents copied to $ag"
 Copy-Item -Path 'tools\story-ctl.py' -Destination (Join-Path $sc 'story-ctl.py') -Force
-Write-Host "controller copied to $sc\story-ctl.py"
+$pk = Join-Path $sc 'storyctl'
+if (Test-Path $pk) { Remove-Item -Recurse -Force $pk }
+New-Item -ItemType Directory -Force -Path $pk | Out-Null
+Copy-Item -Path 'tools\storyctl\*.py' -Destination $pk -Force
+Write-Host "controller copied to $sc (story-ctl.py and the storyctl package)"
 if (-not (Get-Command py -ErrorAction SilentlyContinue)) { Write-Warning "The Python launcher 'py' was not found; the story agent runs 'py'. Install Python from python.org (it includes py)." }
 if (-not (Get-Command copilot -ErrorAction SilentlyContinue)) { Write-Warning "The Copilot CLI (copilot) is not on PATH; the story agent runs the agents through it." }
 if (-not (Get-Command code -ErrorAction SilentlyContinue)) { Write-Host "NOTE: 'code' is not on PATH, so stops will not open in an editor tab by themselves; use the link in the chat instead." }

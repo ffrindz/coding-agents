@@ -15,6 +15,13 @@ Every change was tested before and after with headless Copilot CLI runs on publi
 
 ## 2026-11-28
 
+- **Workflow controller v1.9: split into modules; no change in behaviour.**
+  - **Layout:** `tools/story-ctl.py` is now a 55-line entry point, and the code is in `tools/storyctl/`: 12 modules, one per job, each using only the modules listed before it. The run state that was spread over 17 module globals is now one `State` object. The install scripts copy the package next to the entry point, and the hook commands are unchanged.
+  - **How:** a script prefixed each use of the shared state with `G.`, using Python's own parser to tell a function's local names from the shared ones, and then moved whole functions, unchanged, into the modules. A line-by-line comparison shows only the imports, the module descriptions and the version line differ.
+  - **Mistake caught live:** the first script also rewrote 5 words inside quoted text in f-strings, such as `'%H:%M:%S'` → `'%H:%M:%G.S'`, so the progress page showed "updated 13:30:2026.S". The tests did not catch it; a live run did. All 5 are fixed, a scan found no others, and an existing test now also checks the page header.
+  - **Review:** the review agent on GPT-6.1 Sol compared all 81 functions with v1.8 and found no change in behaviour, no local name swapped with a shared one, and no module using a later one (28 credits). Its only blocker was the added header check, which went beyond the test edits its brief allowed; that is a gap in the brief, not a bug. The Windows installer has not been run.
+  - **Tests:** 84, all passing; two test lines now set the run folder and options through `G`. Live through the relay on GPT-6 Luna: a Jira paste started, investigate ran in the background from the installed package and paused at the handoff, for 0.5 credits.
+
 - **Workflow controller v1.8: fixes from an outside review of v1.7, and from an independent review of these fixes.** Code only; no agent changes.
   - **Criteria (#1, #10 in the outside review):**
     - AC labels in two styles (`AC1:` and `AC 2 -`) or a repeated number used to drop criteria silently; now they are numbered again and you confirm them. In the terminal, the renumbered list is printed.

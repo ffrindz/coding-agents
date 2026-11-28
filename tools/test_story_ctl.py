@@ -655,6 +655,7 @@ class Chat(unittest.TestCase):
         self.assertIn('./mvnw test -Dtest=FooTest   ✓', out); self.assertIn('progress.md', out)
         prog = open(os.path.join(self.run_dir(), 'progress.md')).read()
         self.assertIn('▶ implement round 1 · GPT-6.1 Sol, effort medium · running', prog)
+        self.assertRegex(prog, r'\*\*Working: implement round 1\*\* · .* · updated \d\d:\d\d:\d\d\n')
         self.assertIn('## What implement is doing now (GPT-6.1 Sol, effort medium)', prog)
         self.assertIn('Working: implement round 1 on GPT-6.1 Sol, effort medium', out)
         self.assertEqual(self.wait()['result'], 'Approved')
@@ -854,7 +855,7 @@ def sc_chat_reply(test, run, msg):
     """chat_reply on a hand-made run folder, inside the test repository."""
     old = os.getcwd(); os.chdir(test.repo)
     try:
-        sc.ROOT = test.repo; sc.a = sc.argparse.Namespace(fake=None, no_open=True, log=None, no_log=True, base='HEAD')
+        sc.G.ROOT = test.repo; sc.G.a = sc.argparse.Namespace(fake=None, no_open=True, log=None, no_log=True, base='HEAD')
         return sc.chat_reply({'run': run}, msg)
     finally: os.chdir(old)
 
@@ -911,7 +912,7 @@ class Helpers(unittest.TestCase):
         old = dict(os.environ)
         try:
             os.environ.update(STORY_CTL_NOTIFY='private', STORY_CTL_NOTIFY_CMD=f'"{sys.executable}" "{rec}"')
-            sc.S = d; sc.notify('x')
+            sc.G.S = d; sc.notify('x')
             self.assertEqual(open(out).read(), 'Story\n')
         finally:
             os.environ.clear(); os.environ.update(old); shutil.rmtree(d)

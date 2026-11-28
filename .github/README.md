@@ -39,7 +39,7 @@ Six GitHub Copilot custom agents for working on Angular + Java codebases (Maven 
 1. Download the six `.agent.md` files from this repository (or the whole repository as a ZIP).
 2. Copy them into the `agents` folder inside your user-level `.copilot` folder, which VS Code and the Copilot CLI both read personal agents from: `~/.copilot/agents` on macOS and Linux, `%USERPROFILE%\.copilot\agents` on Windows. Create the folder if it doesn't exist. Copy only the `.agent.md` files: Copilot tries to load every `.md` file in that folder as an agent.
 3. Restart VS Code (or open a new Copilot chat) and check that the six agents appear in the agent picker.
-4. For story, also copy `tools/story-ctl.py` to `~/.story-ctl/story-ctl.py` (`%USERPROFILE%\.story-ctl\story-ctl.py` on Windows).
+4. For story, also copy `tools/story-ctl.py` and the `tools/storyctl` folder into `~/.story-ctl/` (`%USERPROFILE%\.story-ctl\` on Windows). The install scripts do this.
 
 **Updating:** download the new `.agent.md` files and replace the old ones. Each report's first line shows the agent version (for example `# Review (review v3.23)`), so you can tell which version produced it; [CHANGELOG.md](CHANGELOG.md) lists what changed.
 
@@ -92,7 +92,7 @@ How it stays reliable: the story agent never orchestrates. For every message it 
 
 `tools/story-ctl.py` is the workflow controller the story agent relays to; you can also run it directly in VS Code's terminal. The bookkeeping is code instead of a model: handoffs and reports are passed on byte for byte, all your answers go to every later task, verdicts and rounds are read and counted exactly, and it always stops after the handoff and when a review has questions. In tests it ran 30 stories with no orchestration mistake (a model-run story agent made one in about 1 run in 6). It needs Python 3 and the Copilot CLI.
 
-1. Install it as in [Setup](#setup) (or copy `tools/story-ctl.py` anywhere).
+1. Install it as in [Setup](#setup), or copy `tools/story-ctl.py` and `tools/storyctl/` anywhere, keeping them side by side.
 2. Save the story in a text file, as copied from Jira. The criteria are numbered `AC1:`, `AC2:`, ... as in the agent window, and the numbered list is printed at the start. You can also write them as `AC1:` lines yourself; a criterion can continue on indented or bulleted lines below it.
 3. In VS Code's terminal, at the root of the repository you are changing: `python3 <path>/story-ctl.py story.txt --base main`
 4. At each stop it prints the agent's text and opens it in VS Code; press Cmd+Shift+V (Ctrl+Shift+V) for the Markdown preview, where code links open the files. Type your reply and finish with an empty line:
@@ -159,6 +159,27 @@ Chosen by measured quality first, then credits and time per correct result (head
 - **Code quality:** prompt rules did not make review find duplication or null-handling bugs. Use build tools (Checkstyle, PMD, SpotBugs, ESLint, ArchUnit): implement runs the full build and review will not approve without it, so build rules are enforced automatically.
 - **story retypes reports:** the orchestrator passes each report on by rewriting it, so 1 or 2 lines per story can differ by a word or a character from what the subagent wrote. The acceptance criteria reached review verbatim in every test. If a line in a handoff or review looks wrong, check the file it cites.
 - **Prompt rules are not guarantees:** a rule such as "never run git checkout" was followed 1 time in 4. Block commands with tool settings (for example terminal auto-approve deny lists in VS Code) instead.
+
+## Changing the controller
+
+`tools/story-ctl.py` is a small entry point. The code is in `tools/storyctl/`, one module per job. Each module may use only the modules listed before it:
+
+| Module | What it does |
+|---|---|
+| `state` | the run state shared by every part (`G`), the version, tool permissions |
+| `criteria` | AC lines, and numbering criteria pasted from Jira |
+| `reports` | reading verdicts, fields and replies |
+| `repo` | git commands, working-tree snapshots, the run folder |
+| `journal` | saved files, the journal and resume, the run log, problem reports, statistics |
+| `activity` | what a running agent is doing, from its Copilot session log |
+| `progress` | the live progress page and `status.json` |
+| `notify` | editor tabs and desktop notifications |
+| `agents` | running one agent, stops and replies, ending a run |
+| `workflow` | investigate, the handoff, up to 3 implement and review rounds |
+| `chat` | the story agent relay, its hooks, background runs |
+| `cli` | options, starting or resuming a run |
+
+Run `python3 tools/test_story_ctl.py` (offline, no credits) after every change, and have the diff reviewed in a fresh session, and by the review agent on another model, before you push.
 
 ## Changing an agent
 
